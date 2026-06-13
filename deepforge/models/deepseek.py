@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Optional
+import uuid
+from typing import Any, Optional
 
 from openai import OpenAI
 
@@ -55,6 +56,28 @@ class DeepSeekClient:
         self.cache_hit_tokens: int = 0
         self.cache_miss_tokens: int = 0
 
+    @staticmethod
+    def _parse_tool_arguments(raw_arguments: Any, function_name: str) -> dict[str, Any]:
+        if isinstance(raw_arguments, dict):
+            return raw_arguments
+        if not raw_arguments:
+            return {}
+        if not isinstance(raw_arguments, str):
+            return {"_tool_parse_error": f"Invalid tool arguments for {function_name}: expected JSON string or object"}
+
+        try:
+            parsed = json.loads(raw_arguments)
+        except json.JSONDecodeError as exc:
+            return {
+                "_tool_parse_error": (
+                    f"Invalid JSON tool arguments for {function_name}: {exc.msg} at char {exc.pos}. "
+                    "The tool call may have been truncated; retry with valid JSON and split large files into smaller writes."
+                ),
+                "_raw_arguments_preview": raw_arguments[:500],
+                "_raw_arguments_length": len(raw_arguments),
+            }
+        return parsed if isinstance(parsed, dict) else {"_tool_parse_error": f"Invalid tool arguments for {function_name}: expected JSON object"}
+
     # ── Core API Call ──────────────────────────────────────────────
 
     def chat(
@@ -63,7 +86,7 @@ class DeepSeekClient:
         tools: Optional[list[ToolSchema]] = None,
         system_prompt: Optional[str] = None,
         temperature: float = 0.0,
-        max_tokens: int = 4096,
+        max_tokens: Optional[int] = None,
         stream: bool = False,
     ) -> dict:
         """
@@ -110,7 +133,7 @@ class DeepSeekClient:
                 messages=api_messages,
                 tools=api_tools,
                 temperature=temperature,
-                max_tokens=max_tokens,
+                max_tokens=max_tokens or config.max_output_tokens,
                 stream=stream,
             )
         except Exception as e:
@@ -135,13 +158,12 @@ class DeepSeekClient:
         tool_calls: list[ToolCall] = []
         if message.tool_calls:
             for tc in message.tool_calls:
-                tool_calls.append(ToolCall.from_api({
-                    "id": tc.id,
-                    "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments,
-                    },
-                }))
+                function_name = tc.function.name
+                tool_calls.append(ToolCall(
+                    id=tc.id,
+                    function_name=function_name,
+                    arguments=self._parse_tool_arguments(tc.function.arguments, function_name),
+                ))
 
         # Track usage
         usage = response.usage
@@ -175,7 +197,7 @@ class DeepSeekClient:
         tools: Optional[list[ToolSchema]] = None,
         system_prompt: Optional[str] = None,
         temperature: float = 0.0,
-        max_tokens: int = 4096,
+        max_tokens: Optional[int] = None,
     ):
         """
         Stream a chat completion from DeepSeek, yielding events.
@@ -208,7 +230,7 @@ class DeepSeekClient:
                 messages=api_messages,
                 tools=api_tools,
                 temperature=temperature,
-                max_tokens=max_tokens,
+                max_tokens=max_tokens or config.max_output_tokens,
                 stream=True,
                 stream_options={"include_usage": True},
             )
@@ -263,13 +285,11 @@ class DeepSeekClient:
         # Finalize tool calls
         for idx in sorted(tool_call_buffers.keys()):
             buf = tool_call_buffers[idx]
-            try:
-                args = json.loads(buf["arguments"]) if buf["arguments"] else {}
-            except json.JSONDecodeError:
-                args = {}
+            function_name = buf["name"]
+            args = self._parse_tool_arguments(buf["arguments"], function_name)
             tc = ToolCall(
                 id=buf["id"] or str(uuid.uuid4()),
-                function_name=buf["name"],
+                function_name=function_name,
                 arguments=args,
             )
             yield {"type": "tool_call", "tool_call": tc}

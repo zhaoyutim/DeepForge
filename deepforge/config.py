@@ -70,6 +70,7 @@ class Config:
     max_context_tokens: int = 1_000_000  # DeepSeek V4 1M window
     compaction_threshold: float = 0.6     # Compact at 60% usage
     prefix_cache_granularity: int = 128   # 128-token cache blocks
+    max_output_tokens: int = field(default_factory=lambda: int(_env("DEEPFORGE_MAX_OUTPUT_TOKENS", "8192", "CODEX_MAX_OUTPUT_TOKENS")))
 
     # ── Tool Execution ────────────────────────────────────────
     shell_enabled: bool = True

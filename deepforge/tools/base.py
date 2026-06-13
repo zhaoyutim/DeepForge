@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import inspect
 import copy
+import re
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 
@@ -32,6 +33,7 @@ class BaseTool(ABC):
         "properties": {},
         "required": [],
     }
+    argument_aliases: dict[str, list[str]] = {}
 
     # Approval gating flags
     is_read: bool = True
@@ -85,8 +87,31 @@ class BaseTool(ABC):
         required = self.parameters.get("required", [])
         for param in required:
             if param not in tool_call.arguments:
-                return f"Missing required parameter: '{param}'"
+                received = ", ".join(sorted(tool_call.arguments.keys())) or "no arguments"
+                return f"Missing required parameter: '{param}' (received: {received})"
         return None
+
+    def normalize_args(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Return arguments with known aliases copied to canonical names."""
+        normalized = dict(arguments)
+        compact_arguments = {
+            re.sub(r"[^a-z0-9]", "", str(key).lower()): value
+            for key, value in arguments.items()
+        }
+        for canonical_name, aliases in self.argument_aliases.items():
+            if canonical_name in normalized:
+                continue
+            for alias in aliases:
+                if alias in normalized:
+                    normalized[canonical_name] = normalized[alias]
+                    break
+            else:
+                for candidate in (canonical_name, *aliases):
+                    compact_name = re.sub(r"[^a-z0-9]", "", candidate.lower())
+                    if compact_name in compact_arguments:
+                        normalized[canonical_name] = compact_arguments[compact_name]
+                        break
+        return normalized
 
     def __repr__(self) -> str:
         flags = []
@@ -125,6 +150,28 @@ class ToolRegistry:
         for tool in tools:
             self.register(tool)
 
+    def _resolve_tool_name(self, name: str) -> Optional[str]:
+        """Resolve a tool name, accepting common punctuation/casing aliases."""
+        if name in self._tools:
+            return name
+
+        snake_name = str(name).strip().lower().replace("-", "_").replace(" ", "_")
+        if snake_name in self._tools:
+            return snake_name
+
+        compact_name = re.sub(r"[^a-z0-9]", "", snake_name)
+        if not compact_name:
+            return None
+
+        matches = [
+            tool_name
+            for tool_name in self._tools
+            if re.sub(r"[^a-z0-9]", "", tool_name.lower()) == compact_name
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        return None
+
     def clone_filtered(self, allowed_tools: Optional[list[str]] = None) -> "ToolRegistry":
         """Create a new registry containing clones of selected tools."""
         cloned = ToolRegistry()
@@ -137,7 +184,10 @@ class ToolRegistry:
 
     def get(self, name: str) -> Optional[BaseTool]:
         """Look up a tool by name."""
-        return self._tools.get(name)
+        resolved_name = self._resolve_tool_name(name)
+        if resolved_name is None:
+            return None
+        return self._tools.get(resolved_name)
 
     def execute(self, tool_call: ToolCall) -> ToolResult:
         """
@@ -145,7 +195,8 @@ class ToolRegistry:
 
         Returns an error ToolResult if the tool is not found or fails.
         """
-        tool = self._tools.get(tool_call.function_name)
+        resolved_name = self._resolve_tool_name(tool_call.function_name)
+        tool = self._tools.get(resolved_name) if resolved_name else None
         if tool is None:
             return ToolResult(
                 tool_call_id=tool_call.id,
@@ -154,19 +205,35 @@ class ToolRegistry:
                 error=f"Tool '{tool_call.function_name}' not found in registry",
             )
 
+        canonical_call = ToolCall(
+            id=tool_call.id,
+            function_name=resolved_name or tool_call.function_name,
+            arguments=tool.normalize_args(tool_call.arguments),
+        )
+
+        parse_error = canonical_call.arguments.get("_tool_parse_error")
+        if parse_error:
+            return ToolResult(
+                tool_call_id=canonical_call.id,
+                content=f"Error: {parse_error}",
+                success=False,
+                error=str(parse_error),
+                tool_name=resolved_name,
+            )
+
         # Validate arguments
-        validation_error = tool.validate_args(tool_call)
+        validation_error = tool.validate_args(canonical_call)
         if validation_error:
             return ToolResult(
-                tool_call_id=tool_call.id,
+                tool_call_id=canonical_call.id,
                 content=f"Error: {validation_error}",
                 success=False,
                 error=validation_error,
             )
 
         try:
-            result = tool.execute(tool_call)
-            result.tool_name = tool_call.function_name
+            result = tool.execute(canonical_call)
+            result.tool_name = resolved_name
             return result
         except Exception as e:
             return ToolResult(

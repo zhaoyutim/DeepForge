@@ -33,8 +33,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from deepforge.config import ApprovalPolicy, Config, Mode, config
 from deepforge.constitution import HierarchyResolver, Tier, enforce_truth, enforce_verification
 from deepforge.types import Message, Role, ToolCall, ToolResult, ToolSchema, Turn
+from deepforge.models.deepseek import DeepSeekClient
 from deepforge.models.tokenizer import TokenBudget, count_tokens
 from deepforge.tools.base import BaseTool, ToolRegistry
+from deepforge.tools.file_tools import WriteFileTool
 from deepforge.tools.browser_tools import BrowserEvalTool, BrowserOpenTool, BrowserSnapshotTool
 from deepforge.computer.browser import BrowserElement, BrowserSnapshot
 from deepforge.approval.gate import ApprovalGate, GateDecision, GateResult
@@ -130,6 +132,7 @@ class TestConfig:
         monkeypatch.setenv("DEEPFORGE_MODE", "yolo")
         monkeypatch.setenv("DEEPFORGE_APPROVAL", "auto")
         monkeypatch.setenv("DEEPFORGE_BROWSER_HEADLESS", "1")
+        monkeypatch.setenv("DEEPFORGE_MAX_OUTPUT_TOKENS", "12000")
 
         cfg = Config.from_env()
 
@@ -137,6 +140,7 @@ class TestConfig:
         assert cfg.mode == Mode.YOLO
         assert cfg.approval_policy == ApprovalPolicy.AUTO
         assert cfg.browser_headless is True
+        assert cfg.max_output_tokens == 12000
 
     def test_legacy_codex_env_fallback(self, monkeypatch):
         monkeypatch.delenv("DEEPFORGE_API_KEY", raising=False)
@@ -185,6 +189,17 @@ class TestTypes:
         assert tc.id == "call_123"
         assert tc.function_name == "read_file"
         assert tc.arguments == {"path": "/tmp/test"}
+
+    def test_tool_call_from_api_preserves_invalid_json_error(self):
+        api_data = {
+            "id": "call_123",
+            "function": {"name": "write_file", "arguments": '{"path":"game.js","content":"unterminated'},
+        }
+        tc = ToolCall.from_api(api_data)
+
+        assert tc.function_name == "write_file"
+        assert "Invalid JSON tool arguments" in tc.arguments["_tool_parse_error"]
+        assert tc.arguments["_raw_arguments_length"] > 0
 
     def test_tool_schema_to_openai(self):
         schema = ToolSchema(
@@ -271,6 +286,52 @@ class TestToolRegistry:
         result = registry.execute(tc)
         assert result.success
         assert "Echo: hi" in result.content
+
+    def test_execute_tool_with_common_name_alias(self, registry, write_tool):
+        registry.register(write_tool)
+
+        assert registry.get("fakewrite") is write_tool
+        assert registry.get("fake-write") is write_tool
+        assert registry.get("FAKE_WRITE") is write_tool
+
+        tc = ToolCall(
+            id="1",
+            function_name="fakewrite",
+            arguments={"path": "example.txt", "content": "hi"},
+        )
+        result = registry.execute(tc)
+
+        assert result.success
+        assert result.tool_name == "fake_write"
+
+    def test_write_file_accepts_common_argument_aliases(self, registry, temp_workspace, monkeypatch):
+        monkeypatch.setattr(config, "workspace", temp_workspace)
+        registry.register(WriteFileTool())
+        tc = ToolCall(
+            id="1",
+            function_name="writefile",
+            arguments={"file_path": "alias.html", "contents": "<h1>DeepForge</h1>"},
+        )
+
+        result = registry.execute(tc)
+
+        assert result.success
+        assert result.tool_name == "write_file"
+        assert (temp_workspace / "alias.html").read_text() == "<h1>DeepForge</h1>"
+
+    def test_malformed_tool_arguments_are_reported_before_validation(self, registry):
+        registry.register(WriteFileTool())
+        args = DeepSeekClient._parse_tool_arguments(
+            '{"path":"game.js","content":"unterminated',
+            "write_file",
+        )
+        tc = ToolCall(id="1", function_name="write_file", arguments=args)
+
+        result = registry.execute(tc)
+
+        assert not result.success
+        assert "Invalid JSON tool arguments" in result.content
+        assert "Missing required parameter" not in result.content
 
     def test_execute_unknown_tool(self, registry):
         tc = ToolCall(id="1", function_name="nonexistent", arguments={})

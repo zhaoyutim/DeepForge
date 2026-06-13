@@ -37,14 +37,22 @@ class ToolCall:
     def from_api(cls, api_tool_call: dict) -> "ToolCall":
         """Parse from DeepSeek/OpenAI API format."""
         fn = api_tool_call.get("function", {})
+        function_name = fn.get("name", "unknown")
         args_str = fn.get("arguments", "{}")
         try:
             arguments = json.loads(args_str) if isinstance(args_str, str) else args_str
-        except json.JSONDecodeError:
-            arguments = {}
+        except json.JSONDecodeError as exc:
+            arguments = {
+                "_tool_parse_error": (
+                    f"Invalid JSON tool arguments for {function_name}: {exc.msg} at char {exc.pos}. "
+                    "The tool call may have been truncated; retry with valid JSON and split large files into smaller writes."
+                ),
+                "_raw_arguments_preview": args_str[:500],
+                "_raw_arguments_length": len(args_str),
+            }
         return cls(
             id=api_tool_call.get("id", str(uuid.uuid4())),
-            function_name=fn.get("name", "unknown"),
+            function_name=function_name,
             arguments=arguments,
         )
 

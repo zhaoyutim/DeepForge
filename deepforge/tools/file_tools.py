@@ -122,9 +122,13 @@ class WriteFileTool(BaseTool):
     """Write content to a file in the workspace. Creates parent directories."""
 
     name = "write_file"
-    description = "Write content to a UTF-8 file. Creates or overwrites; parent directories are auto-created."
+    description = "Write content to a UTF-8 file. Creates or overwrites; parent directories are auto-created. For large apps, write separate HTML/CSS/JS files instead of one huge tool call."
     is_read = False
     is_write = True
+    argument_aliases = {
+        "path": ["file_path", "filepath", "filename", "file", "name"],
+        "content": ["contents", "text", "body", "data", "code", "source"],
+    }
 
     parameters = {
         "type": "object",

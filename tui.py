@@ -361,6 +361,8 @@ def run_tui(session: Session, *, theme_name: str = "default") -> None:
                     style = "green" if success else "red"
                     symbol = "✓" if success else "✗"
                     console.print(f"[{style}]{symbol} {tool_name}[/]")
+                    if not success and event.get("output"):
+                        console.print(f"[red]{event['output']}[/]")
 
                 elif etype == "done":
                     flush_text_buffer(force=True)

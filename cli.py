@@ -261,7 +261,9 @@ def interactive_mode(session: Session):
                 elif etype == "tool_start":
                     tool_count += 1
                 elif etype == "tool_end":
-                    pass  # silent
+                    if not event.get("success", False):
+                        output = event.get("output") or "Tool failed"
+                        print(f"\n✗ {event.get('name', 'tool')}: {output}")
                 elif etype == "done":
                     latency = event.get("ms", 0)
                     tokens = event.get("tokens", 0)
