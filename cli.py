@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CodeX CLI — interactive terminal interface.
+DeepForge CLI — interactive terminal interface.
 
 Usage:
     python cli.py                          # Start interactive session
@@ -11,13 +11,14 @@ Usage:
 
 Environment:
     DEEPSEEK_API_KEY    DeepSeek API key (required)
-    CODEX_MODE          Default mode (agent/plan/yolo)
-    CODEX_APPROVAL      Default approval policy (auto/suggest/never)
+    DEEPFORGE_MODE      Default mode (agent/plan/yolo)
+    DEEPFORGE_APPROVAL  Default approval policy (auto/suggest/never)
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -25,13 +26,17 @@ from pathlib import Path
 # Add parent directory to path for development use
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from codex.config import ApprovalPolicy, Mode, config
-from codex.session import Session, SessionConfig
+from deepforge.config import ApprovalPolicy, Mode, config
+from deepforge.session import Session, SessionConfig
 
 
 def check_api_key() -> bool:
     """Check if the DeepSeek API key is configured."""
-    key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("CODEX_API_KEY")
+    key = (
+        os.environ.get("DEEPFORGE_API_KEY")
+        or os.environ.get("DEEPSEEK_API_KEY")
+        or os.environ.get("CODEX_API_KEY")
+    )
     if not key:
         print("╔══════════════════════════════════════════════════════════╗")
         print("║  DeepSeek API key not found!                            ║")
@@ -53,7 +58,7 @@ def print_banner(session: Session):
 
     print()
     print("╔══════════════════════════════════════════════════════════╗")
-    print("║                    CodeX v0.1.0                          ║")
+    print("║                    DeepForge v0.1.0                          ║")
     print("║              CodeWhale Architecture in Python            ║")
     print("╠══════════════════════════════════════════════════════════╣")
     print(f"║  Mode: {mode_str:<8}  Policy: {policy_str:<8}                        ║")
@@ -64,12 +69,85 @@ def print_banner(session: Session):
     print("║    /mode agent|plan|yolo   Switch operating mode        ║")
     print("║    /policy auto|suggest    Change approval policy       ║")
     print("║    /tools                  List available tools          ║")
+    print("║    /mcp status|tools|reload Manage MCP servers           ║")
     print("║    /stats                  Show session statistics       ║")
     print("║    /compact                Compact context window        ║")
     print("║    /help                   Show this help                ║")
-    print("║    /exit, /quit            Exit CodeX                    ║")
+    print("║    /exit, /quit            Exit DeepForge                    ║")
     print("╚══════════════════════════════════════════════════════════╝")
     print()
+
+
+def _format_tool_arguments(arguments: dict) -> str:
+    text = json.dumps(arguments or {}, ensure_ascii=False, indent=2)
+    if len(text) > 1000:
+        return text[:1000] + "\n... (truncated)"
+    return text
+
+
+def create_cli_approval_callback():
+    """Create an interactive approval callback for suggest-mode tools."""
+
+    def approve(tool, tool_call, gate_result) -> bool:
+        print()
+        print("Approval required")
+        print(f"  Tool: {tool_call.function_name}")
+        print(f"  Reason: {gate_result.reason}")
+        if tool.is_shell:
+            print("  Type: shell")
+        elif tool.is_write:
+            print("  Type: write")
+        elif tool.requires_approval:
+            print("  Type: approval-required")
+        print("  Arguments:")
+        print(_format_tool_arguments(tool_call.arguments))
+        answer = input("Approve this tool call? [y/N] ").strip().lower()
+        return answer in {"y", "yes"}
+
+    return approve
+
+
+def print_mcp_status(session: Session) -> None:
+    status = session.mcp_status()
+    print(f"MCP enabled: {status.get('enabled')}")
+    if status.get("config_path"):
+        print(f"Config: {status['config_path']}")
+    if status.get("error"):
+        print(f"Error: {status['error']}")
+    servers = status.get("servers") or []
+    if not servers:
+        print("No MCP servers configured or connected.")
+        return
+    for server in servers:
+        state = "connected" if server.get("connected") else "error"
+        print(
+            f"- {server.get('name')} [{server.get('transport')}] {state} "
+            f"tools={server.get('tool_count', 0)} "
+            f"resources={server.get('resource_count', 0)} "
+            f"prompts={server.get('prompt_count', 0)}"
+        )
+        if server.get("error"):
+            print(f"  error: {server['error']}")
+
+
+def handle_mcp_command(parts: list[str], session: Session) -> None:
+    subcommand = parts[1].lower() if len(parts) > 1 else "status"
+    if subcommand == "status":
+        print_mcp_status(session)
+    elif subcommand == "tools":
+        tools = [name for name in session.available_tools if name.startswith("mcp__")]
+        if not tools:
+            print("No MCP tools registered.")
+            return
+        print(f"MCP tools ({len(tools)}):")
+        for name in tools:
+            print(f"  - {name}")
+    elif subcommand == "reload":
+        status = session.reload_mcp()
+        print("MCP reloaded.")
+        print_mcp_status(session)
+    else:
+        print("Usage: /mcp status|tools|reload")
 
 
 def handle_command(cmd: str, session: Session) -> bool:
@@ -121,6 +199,9 @@ def handle_command(cmd: str, session: Session) -> bool:
         else:
             print("No tools available (session not initialized).")
 
+    elif command == "/mcp":
+        handle_mcp_command(parts, session)
+
     elif command == "/stats":
         stats = session.stats()
         print("Session Statistics:")
@@ -155,7 +236,7 @@ def interactive_mode(session: Session):
 
     while True:
         try:
-            user_input = input("codex> ").strip()
+            user_input = input("deepforge> ").strip()
         except (KeyboardInterrupt, EOFError):
             print("\nGoodbye! 👋")
             break
@@ -209,7 +290,7 @@ def one_shot_mode(session: Session, command: str):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="CodeX — CodeWhale Architecture in Python with DeepSeek API",
+        description="DeepForge — CodeWhale Architecture in Python with DeepSeek API",
     )
     parser.add_argument(
         "-c", "--command",
@@ -238,6 +319,16 @@ def main():
         help="DeepSeek model to use (default: deepseek-chat)",
     )
     parser.add_argument(
+        "--mcp-config",
+        default=None,
+        help="MCP config path (default: ~/.deepforge/mcp.yaml)",
+    )
+    parser.add_argument(
+        "--no-mcp",
+        action="store_true",
+        help="Disable MCP integration for this session",
+    )
+    parser.add_argument(
         "--version", "-v",
         action="store_true",
         help="Show version and exit",
@@ -245,8 +336,8 @@ def main():
     args = parser.parse_args()
 
     if args.version:
-        from codex import __version__
-        print(f"CodeX v{__version__}")
+        from deepforge import __version__
+        print(f"DeepForge v{__version__}")
         return
 
     # Check API key
@@ -259,17 +350,23 @@ def main():
         approval_policy=ApprovalPolicy(args.policy) if args.policy else None,
         workspace=Path(args.workspace).resolve() if args.workspace else None,
         model=args.model,
+        mcp_enabled=not args.no_mcp,
+        mcp_config_path=Path(args.mcp_config).expanduser() if args.mcp_config else None,
+        approval_callback=None if args.command else create_cli_approval_callback(),
     )
 
     # Create and initialize session
     session = Session(session_config=session_config)
-    session.initialize()
+    try:
+        session.initialize()
 
-    # Run
-    if args.command:
-        one_shot_mode(session, args.command)
-    else:
-        interactive_mode(session)
+        # Run
+        if args.command:
+            one_shot_mode(session, args.command)
+        else:
+            interactive_mode(session)
+    finally:
+        session.close()
 
 
 if __name__ == "__main__":

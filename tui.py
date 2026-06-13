@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-CodeX TUI — Rich terminal user interface.
+DeepForge TUI — Rich terminal user interface.
 
 Features:
+- Pluggable theme system (themes/ package)
 - Color-coded panels and status bars
 - Live streaming response display
 - Tool execution progress indicators
@@ -11,15 +12,18 @@ Features:
 - Mode/policy/workspace status bar
 
 Usage:
-    python tui.py                  # Interactive TUI
-    python tui.py --mode yolo      # YOLO mode
-    python tui.py --mode plan       # Read-only mode
+    python tui.py                        # Interactive TUI
+    python tui.py --mode yolo            # YOLO mode
+    python tui.py --theme worldcup        # World Cup theme
+    /theme list                           # Show available themes
+    /theme worldcup                       # Switch to World Cup theme
 """
 
 from __future__ import annotations
 
 import argparse
 import atexit
+import json
 import os
 import sys
 import time
@@ -31,47 +35,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
-from rich.live import Live
-from rich.layout import Layout
 from rich.table import Table
-from rich.columns import Columns
-from rich.progress import (
-    Progress,
-    SpinnerColumn,
-    TextColumn,
-    BarColumn,
-    TaskProgressColumn,
-)
-from rich.status import Status
 from rich.align import Align
 from rich import box
 
-from codex.config import ApprovalPolicy, Mode
-from codex.session import Session, SessionConfig
-from codex.agent import AgentResponse
-
-# ── Color Theme ─────────────────────────────────────────────────────
-
-THEME = {
-    "banner": "bold cyan",
-    "mode_agent": "bold green",
-    "mode_plan": "bold yellow",
-    "mode_yolo": "bold red",
-    "policy_auto": "green",
-    "policy_suggest": "yellow",
-    "policy_never": "red",
-    "tool": "dim cyan",
-    "response": "white",
-    "error": "bold red",
-    "success": "green",
-    "context_low": "green",
-    "context_medium": "yellow",
-    "context_high": "orange1",
-    "context_critical": "red",
-    "timestamp": "dim",
-    "separator": "dim",
-    "prompt": "bold white",
-}
+from deepforge.config import ApprovalPolicy, Mode
+from deepforge.session import Session, SessionConfig
+from deepforge.agent import AgentResponse
+import themes
 
 console = Console()
 _READLINE_READY = False
@@ -80,7 +51,11 @@ _READLINE_READY = False
 # ── Helpers ────────────────────────────────────────────────────────
 
 def check_api_key() -> bool:
-    if not (os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("CODEX_API_KEY")):
+    if not (
+        os.environ.get("DEEPFORGE_API_KEY")
+        or os.environ.get("DEEPSEEK_API_KEY")
+        or os.environ.get("CODEX_API_KEY")
+    ):
         console.print(
             Panel(
                 "[bold red]DeepSeek API key not found![/]\n\n"
@@ -108,14 +83,39 @@ def configure_line_editor() -> None:
 
     try:
         readline.parse_and_bind("set editing-mode emacs")
-        readline.parse_and_bind("\\e[D: backward-char")
-        readline.parse_and_bind("\\e[C: forward-char")
-        readline.parse_and_bind("\\e[A: previous-history")
-        readline.parse_and_bind("\\e[B: next-history")
+
+        # ── Arrow keys (VT100 / ANSI) ─────────────────────────
+        readline.parse_and_bind('"\\e[D": backward-char')
+        readline.parse_and_bind('"\\e[C": forward-char')
+        readline.parse_and_bind('"\\e[A": previous-history')
+        readline.parse_and_bind('"\\e[B": next-history')
+
+        # ── Delete key ────────────────────────────────────────
+        readline.parse_and_bind('"\\e[3~": delete-char')
+
+        # ── Home / End keys ───────────────────────────────────
+        readline.parse_and_bind('"\\e[H": beginning-of-line')
+        readline.parse_and_bind('"\\e[F": end-of-line')
+        readline.parse_and_bind('"\\e[1~": beginning-of-line')   # Linux console
+        readline.parse_and_bind('"\\e[4~": end-of-line')         # Linux console
+
+        # ── Option+← / Option+→  word navigation (macOS) ──────
+        readline.parse_and_bind('"\\eb": backward-word')        # iTerm2
+        readline.parse_and_bind('"\\ef": forward-word')         # iTerm2
+        readline.parse_and_bind('"\\e[1;3D": backward-word')    # Terminal.app
+        readline.parse_and_bind('"\\e[1;3C": forward-word')     # Terminal.app
+
+        # ── Option+Delete  kill backward word (macOS) ─────────
+        readline.parse_and_bind('"\\e\\C-h": backward-kill-word')
+        readline.parse_and_bind('"\\e\\C-?": backward-kill-word')
+
+        # ── Ctrl+← / Ctrl+→  word navigation ──────────────────
+        readline.parse_and_bind('"\\e[1;5D": backward-word')
+        readline.parse_and_bind('"\\e[1;5C": forward-word')
     except Exception:
         pass
 
-    history_path = Path.home() / ".codex_history"
+    history_path = Path.home() / ".deepforge_history"
     try:
         history_path.touch(exist_ok=True)
         readline.read_history_file(str(history_path))
@@ -130,7 +130,32 @@ def configure_line_editor() -> None:
 def read_user_input() -> str:
     """Read one editable prompt line from the terminal."""
     configure_line_editor()
-    return console.input("[bold cyan]codex[/]› ").strip()
+    return console.input("[bold cyan]deepforge[/]› ").strip()
+
+
+def _format_tool_arguments(arguments: dict) -> str:
+    text = json.dumps(arguments or {}, ensure_ascii=False, indent=2)
+    if len(text) > 1000:
+        return text[:1000] + "\n... (truncated)"
+    return text
+
+
+def create_tui_approval_callback():
+    """Create an interactive approval callback for suggest-mode tools."""
+
+    def approve(tool, tool_call, gate_result) -> bool:
+        console.print()
+        console.print(Panel(
+            f"[bold]Tool:[/] {tool_call.function_name}\n"
+            f"[bold]Reason:[/] {gate_result.reason}\n\n"
+            f"[bold]Arguments:[/]\n{_format_tool_arguments(tool_call.arguments)}",
+            title="Approval Required",
+            border_style="yellow",
+        ))
+        answer = console.input("Approve this tool call? [bold][y/N][/]: ").strip().lower()
+        return answer in {"y", "yes"}
+
+    return approve
 
 
 def mode_color(mode: Mode) -> str:
@@ -158,9 +183,26 @@ def pressure_color(pressure: str) -> str:
     }.get(pressure, "white")
 
 
+def get_term_width() -> int:
+    """Get current terminal width, with fallback."""
+    try:
+        return console.width
+    except Exception:
+        import shutil
+        return shutil.get_terminal_size().columns
+
+
 def pressure_bar(pressure: str, ratio: float) -> Text:
-    """Build a color-coded pressure bar like ████░░░░ 45%."""
-    bar_width = 10
+    """Build a color-coded pressure bar that adapts to terminal width."""
+    tw = get_term_width()
+    # Scale bar width with terminal: 8 on narrow, up to 15 on wide
+    if tw < 80:
+        bar_width = 8
+    elif tw < 120:
+        bar_width = 10
+    else:
+        bar_width = 14
+
     filled = int(ratio * bar_width)
     empty = bar_width - filled
     color = pressure_color(pressure)
@@ -171,73 +213,21 @@ def pressure_bar(pressure: str, ratio: float) -> Text:
     return bar
 
 
-# ── Banner ──────────────────────────────────────────────────────────
-
-def render_banner(session: Session) -> Panel:
-    """Render the welcome banner."""
-    mode_str = session.mode.value.upper()
-    policy_str = session.policy.value.upper()
-    workspace_str = str(session.workspace)
-    if len(workspace_str) > 50:
-        workspace_str = "..." + workspace_str[-47:]
-
-    text = Text()
-    text.append("┌──────────────────────────────────────────────┐\n", style="dim cyan")
-    text.append("│          ", style="dim cyan")
-    text.append("CodeX v0.1.0", style="bold cyan")
-    text.append("                                │\n", style="dim cyan")
-    text.append("│     ", style="dim cyan")
-    text.append("CodeWhale Architecture in Python", style="cyan")
-    text.append("           │\n", style="dim cyan")
-    text.append("├──────────────────────────────────────────────┤\n", style="dim cyan")
-    text.append("│  ", style="dim cyan")
-    text.append(f"Mode: [bold]{mode_str:<6}[/] ", style=mode_color(session.mode))
-    text.append(f"Policy: [bold]{policy_str:<6}[/] ", style=policy_color(session.policy))
-    text.append("    │\n", style="dim cyan")
-    text.append("│  ", style="dim cyan")
-    text.append(f"Tools: {len(session.available_tools):<2}  ")
-    text.append(f"Workspace: {workspace_str:<34} │\n", style="dim")
-    text.append("├──────────────────────────────────────────────┤\n", style="dim cyan")
-    text.append("│  ", style="dim cyan")
-    text.append("/mode /policy /tools /stats /compact /help /exit", style="dim")
-    text.append("  │\n", style="dim cyan")
-    text.append("└──────────────────────────────────────────────┘", style="dim cyan")
-
-    return Panel(text, border_style="cyan")
-
-
-def render_status_bar(session: Session) -> Text:
-    """Render a compact status line."""
-    ctx_stats = session.get_context_stats()
-    pressure = ctx_stats.get("pressure", "low")
-    ratio = float(ctx_stats.get("usage_ratio", "0%").rstrip("%")) / 100 if ctx_stats.get("usage_ratio") else 0.0
-
-    bar = Text()
-    bar.append(f" {session.mode.value.upper()} ", style=mode_color(session.mode))
-    bar.append(f" {session.policy.value.upper()} ", style=policy_color(session.policy))
-    bar.append("  Context: ", style="dim")
-    bar.append_text(pressure_bar(pressure, ratio))
-    bar.append(" ")
-    bar.append(f"  Tools: {len(session.available_tools)}", style="dim")
-    return bar
-
-
 # ── Response Rendering ─────────────────────────────────────────────
 
 def render_response(response: AgentResponse) -> None:
     """Render the agent's response with metadata."""
-    # Print content
     if response.content:
         console.print()
         console.print(response.content)
     else:
         console.print("[dim](no response)[/]")
 
-    # Print metadata footer
     footer_parts = []
     if response.tool_results:
-        tool_names = [r.tool_call_id for r in response.tool_results[:3]]
-        footer_parts.append(f"{len(response.tool_results)} tool(s)")
+        display_names = [r.tool_name or r.tool_call_id[:8] for r in response.tool_results[:3]]
+        names_str = ", ".join(display_names)
+        footer_parts.append(f"{len(response.tool_results)} tool(s): {names_str}")
     footer_parts.append(f"{response.latency_ms:.0f}ms")
     footer_parts.append(f"{response.total_tokens_used:,} tokens")
 
@@ -257,6 +247,7 @@ class ToolProgressDisplay:
     """Shows real-time tool execution progress."""
 
     def __init__(self):
+        from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
         self.progress = Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -290,14 +281,24 @@ class ToolProgressDisplay:
 
 # ── Interactive Loop ───────────────────────────────────────────────
 
-def run_tui(session: Session) -> None:
+def run_tui(session: Session, *, theme_name: str = "default") -> None:
     """Main TUI loop with streaming output."""
+    # Activate the selected theme
+    try:
+        themes.activate(theme_name)
+    except ValueError:
+        console.print(f"[yellow]⚠ Theme '{theme_name}' not found, using default[/]")
+        themes.activate("default")
+        theme_name = "default"
+
+    active = themes.get_active()
     console.clear()
-    console.print(render_banner(session))
+    console.print(active.render_banner(session))
 
     while True:
         try:
-            console.print(render_status_bar(session))
+            bar = active.render_status_bar(session)
+            console.print(bar)
             console.print()
             user_input = read_user_input()
         except (KeyboardInterrupt, EOFError):
@@ -312,8 +313,8 @@ def run_tui(session: Session) -> None:
                 break
             continue
 
-        # ── Streaming response (CodeWhale CLI style) ─────────
-        console.print()  # blank line before response
+        # ── Streaming response ─────────────────────────────────
+        console.print()
         tool_count = 0
         all_tool_names: list[str] = []
         text_buffer = ""
@@ -400,7 +401,8 @@ def handle_command(cmd: str, session: Session) -> bool:
         return False
 
     elif command == "/help":
-        console.print(render_banner(session))
+        active = themes.get_active() or themes.get("default")
+        console.print(active.render_banner(session))
 
     elif command == "/mode":
         if len(parts) < 2:
@@ -434,7 +436,20 @@ def handle_command(cmd: str, session: Session) -> bool:
             table.add_column("Type", style="dim")
             for t in tools:
                 tool_obj = session.registry.get(t)
-                tool_type = "📖 read" if (tool_obj and tool_obj.is_read and not tool_obj.is_write) else "✏️ write" if (tool_obj and tool_obj.is_write) else "⚙️ shell"
+                if tool_obj is None:
+                    tool_type = "❓ unknown"
+                elif tool_obj.is_shell:
+                    tool_type = "⚙️ shell"
+                elif tool_obj.is_write:
+                    tool_type = "✏️ write"
+                elif tool_obj.requires_approval:
+                    tool_type = "⚠ approval"
+                elif tool_obj.is_network:
+                    tool_type = "🌐 network"
+                elif tool_obj.is_read:
+                    tool_type = "📖 read"
+                else:
+                    tool_type = "❓ custom"
                 table.add_row(t, tool_type)
             console.print(table)
         else:
@@ -450,6 +465,9 @@ def handle_command(cmd: str, session: Session) -> bool:
                 value = ", ".join(f"{k}={v}" for k, v in value.items())
             table.add_row(key.replace("_", " ").title(), str(value))
         console.print(table)
+
+    elif command == "/mcp":
+        _cmd_mcp(parts, session)
 
     elif command == "/context":
         ctx_stats = session.get_context_stats()
@@ -472,9 +490,13 @@ def handle_command(cmd: str, session: Session) -> bool:
         else:
             console.print(f"[dim]ℹ[/] {result.get('reason', 'Not needed')}")
 
+    elif command == "/theme":
+        _cmd_theme(parts, session)
+
     elif command == "/clear":
         console.clear()
-        console.print(render_banner(session))
+        active = themes.get_active() or themes.get("default")
+        console.print(active.render_banner(session))
 
     else:
         console.print(f"[dim]Unknown command: {command}. Type /help for available commands.[/]")
@@ -482,20 +504,127 @@ def handle_command(cmd: str, session: Session) -> bool:
     return True
 
 
+def _cmd_mcp(parts: list[str], session: Session) -> None:
+    """Handle the /mcp command."""
+    subcommand = parts[1].lower() if len(parts) > 1 else "status"
+    if subcommand == "reload":
+        session.reload_mcp()
+        console.print("[green]✓[/] MCP reloaded")
+        subcommand = "status"
+
+    if subcommand == "status":
+        status = session.mcp_status()
+        table = Table(title="MCP Status", box=box.SIMPLE)
+        table.add_column("Server", style="cyan")
+        table.add_column("Transport")
+        table.add_column("State")
+        table.add_column("Tools")
+        table.add_column("Resources")
+        table.add_column("Prompts")
+        servers = status.get("servers") or []
+        if not servers:
+            table.add_row("-", "-", "disabled" if not status.get("enabled") else "none", "0", "0", "0")
+        for server in servers:
+            state = "connected" if server.get("connected") else f"error: {server.get('error') or 'not connected'}"
+            table.add_row(
+                str(server.get("name")),
+                str(server.get("transport")),
+                state,
+                str(server.get("tool_count", 0)),
+                str(server.get("resource_count", 0)),
+                str(server.get("prompt_count", 0)),
+            )
+        console.print(table)
+        if status.get("config_path"):
+            console.print(f"[dim]Config: {status['config_path']}[/]")
+        if status.get("error"):
+            console.print(f"[red]{status['error']}[/]")
+    elif subcommand == "tools":
+        tools = [name for name in session.available_tools if name.startswith("mcp__")]
+        if not tools:
+            console.print("[dim]No MCP tools registered.[/]")
+            return
+        table = Table(title=f"MCP Tools ({len(tools)})", box=box.SIMPLE)
+        table.add_column("Tool", style="cyan")
+        for name in tools:
+            table.add_row(name)
+        console.print(table)
+    else:
+        console.print("Usage: [bold]/mcp status|tools|reload[/]")
+
+
+def _cmd_theme(parts: list[str], session: Session) -> None:
+    """Handle the /theme command."""
+    if len(parts) < 2:
+        # Show current theme and available themes
+        current = themes.get_active()
+        name = current.name if current else "default"
+        console.print(f"Current theme: [bold green]{name}[/]")
+        console.print("\nAvailable themes:")
+        for t_name, t in sorted(themes.list_themes().items()):
+            marker = " ◀ active" if current and t_name == current.name else ""
+            console.print(f"  [bold cyan]{t_name}[/] — {t.label}{marker}")
+        console.print("\nUsage: [bold]/theme <name>[/]  or  [bold]/theme off[/]  to reset to default")
+        return
+
+    sub = parts[1].lower()
+    if sub in ("off", "default", "reset"):
+        themes.activate("default")
+        console.clear()
+        console.print(themes.get_active().render_banner(session))
+        console.print("[green]✓[/] Theme reset to [bold cyan]default[/].")
+        return
+
+    if sub == "list":
+        console.print("Available themes:")
+        for t_name, t in sorted(themes.list_themes().items()):
+            console.print(f"  [bold cyan]{t_name}[/] — {t.label}")
+        return
+
+    # Activate a specific theme
+    try:
+        new_theme = themes.activate(sub)
+        console.clear()
+        console.print(new_theme.render_banner(session))
+
+        # If the theme has a dashboard, render it
+        if new_theme.render_dashboard:
+            try:
+                for renderable in new_theme.render_dashboard(session):
+                    console.print()
+                    console.print(renderable)
+            except Exception:
+                pass  # Dashboard is optional, failure shouldn't crash
+
+        console.print()
+        console.print(f"[green]✓[/] Theme switched to [bold cyan]{sub}[/].")
+        console.print("[dim]Tip: /theme off to return to default.[/]")
+    except ValueError as e:
+        available = ", ".join(themes.list_themes().keys())
+        console.print(f"[red]✗[/] {e}")
+        console.print(f"[dim]Available: {available}[/]")
+
+
 # ── Main ────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="CodeX TUI — Rich Terminal Interface")
+    parser = argparse.ArgumentParser(description="DeepForge TUI — Rich Terminal Interface")
     parser.add_argument("--mode", choices=["agent", "plan", "yolo"], default=None)
     parser.add_argument("--policy", choices=["auto", "suggest", "never"], default=None)
     parser.add_argument("--workspace", "-w", default=None)
     parser.add_argument("--model", default=None)
+    parser.add_argument("--mcp-config", default=None,
+                        help="MCP config path (default: ~/.deepforge/mcp.yaml)")
+    parser.add_argument("--no-mcp", action="store_true",
+                        help="Disable MCP integration for this session")
     parser.add_argument("--version", "-v", action="store_true")
+    parser.add_argument("--theme", default="default",
+                        help="Visual theme (default, worldcup)")
     args = parser.parse_args()
 
     if args.version:
-        from codex import __version__
-        console.print(f"CodeX v{__version__}")
+        from deepforge import __version__
+        console.print(f"DeepForge v{__version__}")
         return
 
     if not check_api_key():
@@ -506,12 +635,17 @@ def main():
         approval_policy=ApprovalPolicy(args.policy) if args.policy else None,
         workspace=Path(args.workspace).resolve() if args.workspace else None,
         model=args.model,
+        mcp_enabled=not args.no_mcp,
+        mcp_config_path=Path(args.mcp_config).expanduser() if args.mcp_config else None,
+        approval_callback=create_tui_approval_callback(),
     )
 
     session = Session(session_config=session_config)
-    session.initialize()
-
-    run_tui(session)
+    try:
+        session.initialize()
+        run_tui(session, theme_name=args.theme)
+    finally:
+        session.close()
 
 
 if __name__ == "__main__":

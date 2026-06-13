@@ -2,10 +2,10 @@
 from setuptools import setup, find_packages
 
 setup(
-    name="codex",
+    name="deepforge",
     version="0.1.0",
     description="CodeWhale Architecture in Python with DeepSeek API",
-    packages=find_packages(include=["codex", "codex.*"]),
+    packages=find_packages(include=["deepforge", "deepforge.*"]),
     python_requires=">=3.10",
     install_requires=[
         "openai>=1.0.0",
@@ -15,8 +15,10 @@ setup(
         "pydantic>=2.0.0",
         "gitpython>=3.1.0",
         "pyyaml>=6.0",
+        "mcp>=1.27,<2",
     ],
     extras_require={
         "dev": ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.3"],
+        "browser": ["playwright>=1.45.0"],
     },
 )

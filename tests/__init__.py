@@ -1,1 +1,1 @@
-"""Tests for CodeX."""
+"""Tests for DeepForge."""

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Offline Rich visualization for the CodeX TUI architecture.
+"""Offline Rich visualization for the DeepForge TUI architecture.
 
 This script renders a dashboard-style preview of how the interactive TUI
-connects to the core CodeX subsystems. It intentionally stays below the model
+connects to the core DeepForge subsystems. It intentionally stays below the model
 layer, so it can run without a DeepSeek API key while still exercising the real
 tool registry, approval gate, context window, and dispatcher.
 """
@@ -24,16 +24,16 @@ from rich.progress import BarColumn, Progress, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-from codex.approval.gate import ApprovalGate, GateDecision
-from codex.config import ApprovalPolicy, Mode, config
-from codex.context.window import ContextWindow
-from codex.dispatch.dispatcher import DispatchResult, ToolDispatcher
-from codex.tools.base import BaseTool, ToolRegistry
-from codex.tools.file_tools import EditFileTool, ListDirectoryTool, ReadFileTool, WriteFileTool
-from codex.tools.git_tools import GitDiffTool, GitLogTool, GitStatusTool
-from codex.tools.search_tools import FetchUrlTool, FileSearchTool, GrepFilesTool, WebSearchTool
-from codex.tools.shell_tools import ExecShellTool
-from codex.types import Message, ToolCall, Turn
+from deepforge.approval.gate import ApprovalGate, GateDecision
+from deepforge.config import ApprovalPolicy, Mode, config
+from deepforge.context.window import ContextWindow
+from deepforge.dispatch.dispatcher import DispatchResult, ToolDispatcher
+from deepforge.tools.base import BaseTool, ToolRegistry
+from deepforge.tools.file_tools import EditFileTool, ListDirectoryTool, ReadFileTool, WriteFileTool
+from deepforge.tools.git_tools import GitDiffTool, GitLogTool, GitStatusTool
+from deepforge.tools.search_tools import FetchUrlTool, FileSearchTool, GrepFilesTool, WebSearchTool
+from deepforge.tools.shell_tools import ExecShellTool
+from deepforge.types import Message, ToolCall, Turn
 
 
 console = Console()
@@ -57,7 +57,7 @@ PRESSURE_STYLES = {
     "critical": "red",
 }
 
-SYSTEM_PROMPT_TEMPLATE = """You are CodeX, an AI coding agent running on DeepSeek.
+SYSTEM_PROMPT_TEMPLATE = """You are DeepForge, an AI coding agent running on DeepSeek.
 
 Current workspace: {workspace}
 Current mode: {mode}
@@ -88,7 +88,7 @@ def register_visualizer_tools(registry: ToolRegistry) -> ToolRegistry:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Render an offline visualization of the CodeX TUI core flow.",
+        description="Render an offline visualization of the DeepForge TUI core flow.",
     )
     parser.add_argument("--mode", choices=[m.value for m in Mode], default=Mode.AGENT.value)
     parser.add_argument(
@@ -129,7 +129,7 @@ def build_context(workspace: Path, mode: Mode, policy: ApprovalPolicy) -> Contex
 
 
 def header_panel(workspace: Path, mode: Mode, policy: ApprovalPolicy, registry: ToolRegistry) -> Panel:
-    title = Text("CodeX TUI Visualizer", style="bold cyan")
+    title = Text("DeepForge TUI Visualizer", style="bold cyan")
     subtitle = Text("offline core-flow preview", style="dim")
 
     table = Table.grid(expand=True)
@@ -202,7 +202,7 @@ def pipeline_panel() -> Panel:
     cards = []
     for index, (name, detail) in enumerate(steps, start=1):
         body = Text.assemble((f"{index}. {name}\n", "bold cyan"), (detail, "white"))
-        cards.append(Panel(body, border_style="dim", box=box.ROUNDED, width=22))
+        cards.append(Panel(body, border_style="dim", box=box.ROUNDED))
     return Panel(Columns(cards, equal=True, expand=True), title="TUI Core Flow", border_style="cyan")
 
 

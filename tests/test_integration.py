@@ -1,5 +1,5 @@
 """
-Integration tests for CodeX.
+Integration tests for DeepForge.
 
 Tests the full architecture:
 - Configuration and types
@@ -30,14 +30,18 @@ import pytest
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from codex.config import ApprovalPolicy, Config, Mode, config
-from codex.constitution import HierarchyResolver, Tier, enforce_verification
-from codex.types import Message, Role, ToolCall, ToolResult, ToolSchema, Turn
-from codex.models.tokenizer import TokenBudget, count_tokens
-from codex.tools.base import BaseTool, ToolRegistry
-from codex.approval.gate import ApprovalGate, GateDecision, GateResult
-from codex.context.window import ContextWindow
-from codex.dispatch.dispatcher import ToolDispatcher
+from deepforge.config import ApprovalPolicy, Config, Mode, config
+from deepforge.constitution import HierarchyResolver, Tier, enforce_truth, enforce_verification
+from deepforge.types import Message, Role, ToolCall, ToolResult, ToolSchema, Turn
+from deepforge.models.tokenizer import TokenBudget, count_tokens
+from deepforge.tools.base import BaseTool, ToolRegistry
+from deepforge.tools.browser_tools import BrowserEvalTool, BrowserOpenTool, BrowserSnapshotTool
+from deepforge.computer.browser import BrowserElement, BrowserSnapshot
+from deepforge.approval.gate import ApprovalGate, GateDecision, GateResult
+from deepforge.context.window import ContextWindow
+from deepforge.dispatch.dispatcher import ToolDispatcher
+from deepforge.mcp.config import MCPConfig, MCPToolOverride
+from deepforge.mcp.tools import MCPRemoteTool, mcp_tool_name
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -120,6 +124,34 @@ class TestConfig:
         assert cfg.model == "deepseek-chat"
         assert cfg.mode == Mode.AGENT
         assert cfg.max_context_tokens == 1_000_000
+
+    def test_deepforge_env_prefix(self, monkeypatch):
+        monkeypatch.setenv("DEEPFORGE_API_KEY", "new-key")
+        monkeypatch.setenv("DEEPFORGE_MODE", "yolo")
+        monkeypatch.setenv("DEEPFORGE_APPROVAL", "auto")
+        monkeypatch.setenv("DEEPFORGE_BROWSER_HEADLESS", "1")
+
+        cfg = Config.from_env()
+
+        assert cfg.api_key == "new-key"
+        assert cfg.mode == Mode.YOLO
+        assert cfg.approval_policy == ApprovalPolicy.AUTO
+        assert cfg.browser_headless is True
+
+    def test_legacy_codex_env_fallback(self, monkeypatch):
+        monkeypatch.delenv("DEEPFORGE_API_KEY", raising=False)
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        monkeypatch.delenv("DEEPFORGE_MODE", raising=False)
+        monkeypatch.delenv("DEEPFORGE_APPROVAL", raising=False)
+        monkeypatch.setenv("CODEX_API_KEY", "legacy-key")
+        monkeypatch.setenv("CODEX_MODE", "plan")
+        monkeypatch.setenv("CODEX_APPROVAL", "never")
+
+        cfg = Config.from_env()
+
+        assert cfg.api_key == "legacy-key"
+        assert cfg.mode == Mode.PLAN
+        assert cfg.approval_policy == ApprovalPolicy.NEVER
 
     def test_mode_enum(self):
         assert Mode("agent") == Mode.AGENT
@@ -262,6 +294,148 @@ class TestToolRegistry:
         assert not mock_tool.requires_approval
         assert write_tool.requires_approval
 
+    def test_clone_filtered_preserves_stateful_tools(self, registry, mock_tool):
+        registry.register(mock_tool)
+        cloned = registry.clone_filtered(["echo"])
+        assert cloned.get("echo") is not mock_tool
+        assert cloned.get("echo").name == "echo"
+
+
+class TestBrowserTools:
+    class FakeRuntime:
+        def __init__(self):
+            self.opened = None
+
+        def _snapshot(self):
+            return BrowserSnapshot(
+                url="https://example.test/",
+                title="Example",
+                body_text="Example page text",
+                elements=[
+                    BrowserElement(
+                        ref="e0",
+                        tag="button",
+                        role="button",
+                        name="Continue",
+                        selector='[data-deepforge-ref="e0"]',
+                    )
+                ],
+            )
+
+        def open(self, url, *, new_page=False):
+            self.opened = (url, new_page)
+            return self._snapshot()
+
+        def snapshot(self, *, max_elements=None):
+            return self._snapshot()
+
+    def test_browser_open_tool_uses_runtime_and_formats_snapshot(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(config, "audit_dir", tmp_path)
+        runtime = self.FakeRuntime()
+        tool = BrowserOpenTool(runtime)
+        tc = ToolCall(id="1", function_name="browser_open", arguments={"url": "example.test"})
+
+        result = tool.execute(tc)
+
+        assert result.success
+        assert runtime.opened == ("example.test", False)
+        assert "URL: https://example.test/" in result.content
+        assert "ref=e0" in result.content
+        assert "Continue" in result.content
+
+    def test_browser_snapshot_tool_is_read_only(self):
+        tool = BrowserSnapshotTool(self.FakeRuntime())
+        tc = ToolCall(id="1", function_name="browser_snapshot", arguments={})
+
+        result = tool.execute(tc)
+
+        assert tool.is_read
+        assert not tool.requires_approval
+        assert result.success
+        assert "Interactive elements" in result.content
+
+    def test_browser_eval_requires_approval(self):
+        tool = BrowserEvalTool(self.FakeRuntime())
+        gate = ApprovalGate(mode=Mode.AGENT, policy=ApprovalPolicy.SUGGEST)
+
+        result = gate.check(tool)
+
+        assert tool.requires_approval
+        assert result.decision == GateDecision.PROMPT
+
+
+# ═══════════════════════════════════════════════════════════════════
+# MCP Integration (unit tests, no MCP SDK required)
+# ═══════════════════════════════════════════════════════════════════
+
+class TestMCPConfig:
+    def test_load_mcp_config_from_custom_path(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("GITHUB_TOKEN", "secret-token")
+        cfg_path = tmp_path / "mcp.yaml"
+        cfg_path.write_text(
+            """
+mcp:
+  enabled: true
+  servers:
+    github:
+      transport: streamable-http
+      url: https://example.test/mcp
+      headers:
+        Authorization: env:GITHUB_TOKEN
+      retry_attempts: 2
+      tool_overrides:
+        create_issue:
+          is_write: true
+          requires_approval: true
+""",
+            encoding="utf-8",
+        )
+
+        cfg = MCPConfig.load(cfg_path)
+        assert cfg.enabled
+        assert cfg.path == cfg_path
+        assert len(cfg.servers) == 1
+        server = cfg.servers[0]
+        assert server.name == "github"
+        assert server.transport == "streamable_http"
+        assert server.headers["Authorization"] == "secret-token"
+        assert server.retry_attempts == 2
+        assert server.tool_overrides["create_issue"].is_write is True
+
+
+class TestMCPTools:
+    def test_mcp_tool_name_is_function_safe(self):
+        assert mcp_tool_name("GitHub API", "create-issue") == "mcp__github_api__create_issue"
+
+    def test_unknown_mcp_tool_requires_approval(self):
+        remote_tool = {
+            "name": "create_issue",
+            "description": "Create an issue",
+            "inputSchema": {"type": "object", "properties": {}},
+        }
+        tool = MCPRemoteTool(MagicMock(), "github", remote_tool, MCPToolOverride())
+        gate = ApprovalGate(mode=Mode.AGENT, policy=ApprovalPolicy.SUGGEST)
+        result = gate.check(tool)
+        assert tool.requires_approval
+        assert result.decision == GateDecision.PROMPT
+
+    def test_readonly_mcp_tool_override_can_skip_approval(self):
+        remote_tool = {
+            "name": "search",
+            "description": "Search GitHub",
+            "inputSchema": {"type": "object", "properties": {}},
+        }
+        tool = MCPRemoteTool(
+            MagicMock(),
+            "github",
+            remote_tool,
+            MCPToolOverride(is_read=True, is_write=False, requires_approval=False),
+        )
+        gate = ApprovalGate(mode=Mode.AGENT, policy=ApprovalPolicy.SUGGEST)
+        result = gate.check(tool)
+        assert not tool.requires_approval
+        assert result.decision == GateDecision.ALLOW
+
 
 # ═══════════════════════════════════════════════════════════════════
 # Approval Gate
@@ -388,7 +562,7 @@ class TestDispatcher:
 
 class TestSubAgent:
     def test_sub_agent_config(self):
-        from codex.sub_agent import SubAgentConfig
+        from deepforge.sub_agent import SubAgentConfig
         cfg = SubAgentConfig(
             name="test",
             prompt="Do something",
@@ -403,8 +577,12 @@ class TestSubAgent:
 # ═══════════════════════════════════════════════════════════════════
 
 live = pytest.mark.skipif(
-    not os.environ.get("DEEPSEEK_API_KEY"),
-    reason="DEEPSEEK_API_KEY not set — set it to run live tests",
+    not (
+        os.environ.get("DEEPFORGE_API_KEY")
+        or os.environ.get("DEEPSEEK_API_KEY")
+        or os.environ.get("CODEX_API_KEY")
+    ),
+    reason="DeepSeek API key not set — set it to run live tests",
 )
 
 
@@ -412,7 +590,7 @@ class TestLiveAgent:
     @live
     def test_session_lifecycle(self, temp_workspace):
         """Test full session lifecycle with real API."""
-        from codex.session import Session, SessionConfig
+        from deepforge.session import Session, SessionConfig
 
         session = Session(SessionConfig(
             mode=Mode.AGENT,
@@ -429,11 +607,11 @@ class TestLiveAgent:
     @live
     def test_tool_calling(self, temp_workspace):
         """Test that the agent can use tools."""
-        from codex.session import Session, SessionConfig
+        from deepforge.session import Session, SessionConfig
 
         # Create a test file
         test_file = temp_workspace / "test.txt"
-        test_file.write_text("Hello from CodeX!")
+        test_file.write_text("Hello from DeepForge!")
 
         session = Session(SessionConfig(
             mode=Mode.AGENT,
@@ -447,7 +625,7 @@ class TestLiveAgent:
             "Start your answer with 'FILE_CONTENT:'."
         )
         assert response.success
-        assert "Hello from CodeX" in response.content
+        assert "Hello from DeepForge" in response.content
         assert len(response.tool_results) > 0
 
 

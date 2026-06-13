@@ -3,14 +3,14 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "codex"
+name = "deepforge"
 version = "0.1.0"
 description = "CodeWhale Architecture in Python — AI coding agent with tool calling, context management, and parallel dispatch"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
-    {name = "CodeX Contributors"}
+    {name = "DeepForge Contributors"}
 ]
 keywords = ["ai", "coding-agent", "tool-calling", "deepseek", "llm"]
 classifiers = [
@@ -31,6 +31,7 @@ dependencies = [
     "pydantic>=2.0.0",
     "gitpython>=3.1.0",
     "pyyaml>=6.0",
+    "mcp>=1.27,<2",
 ]
 
 [project.optional-dependencies]
@@ -39,9 +40,12 @@ dev = [
     "pytest-asyncio>=0.23",
     "ruff>=0.3",
 ]
+browser = [
+    "playwright>=1.45.0",
+]
 
 [project.scripts]
-codex = "cli:main"
+deepforge = "cli:main"
 
 [tool.setuptools.packages.find]
-include = ["codex*"]
+include = ["deepforge*"]

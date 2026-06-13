@@ -1,4 +1,4 @@
-# CodeX - A Python implementation of the CodeWhale architecture
+# DeepForge - A Python implementation of the CodeWhale architecture
 # Dependencies for DeepSeek API, tool calling, context management
 
 # DeepSeek API (OpenAI-compatible)
@@ -21,4 +21,11 @@ gitpython>=3.1.0
 
 # YAML config support
 pyyaml>=6.0
+
+# MCP client integration (pin below v2 while v2 is pre-release/alpha)
+mcp>=1.27,<2
+
+# Optional browser computer use:
+#   pip install -e '.[browser]'
+#   python -m playwright install chromium
 

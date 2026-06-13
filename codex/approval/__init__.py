@@ -1,1 +1,0 @@
-"""Approval gate for CodeX."""
