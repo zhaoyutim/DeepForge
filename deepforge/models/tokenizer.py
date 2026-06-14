@@ -7,7 +7,6 @@ For accurate counting, we use tiktoken's cl100k_base encoding as a close approxi
 
 from __future__ import annotations
 
-from typing import Optional
 
 try:
     import tiktoken

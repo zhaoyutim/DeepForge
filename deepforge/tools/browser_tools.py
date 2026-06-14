@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 from deepforge.audit import get_audit_log
-from deepforge.computer.browser import BrowserRuntime, BrowserRuntimeError, get_browser_runtime
+from deepforge.computer.browser import BrowserRuntime, get_browser_runtime
 from deepforge.config import config
 from deepforge.tools.base import BaseTool
 from deepforge.types import ToolCall, ToolResult

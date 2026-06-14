@@ -19,14 +19,12 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from deepforge.approval.gate import ApprovalGate, GateDecision
-from deepforge.config import config
 from deepforge.context.window import ContextWindow
 from deepforge.dispatch.dispatcher import ToolDispatcher
 from deepforge.models.deepseek import DeepSeekClient, get_client
-from deepforge.models.tokenizer import count_tokens
 from deepforge.tools.base import ToolRegistry, get_registry
 from deepforge.tools.base import BaseTool
-from deepforge.types import Message, Role, ToolCall, ToolResult, Turn
+from deepforge.types import Message, ToolCall, ToolResult, Turn
 
 
 ApprovalCallback = Callable[[BaseTool, ToolCall, object], bool]

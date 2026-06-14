@@ -25,4 +25,5 @@ venv/
 Thumbs.db
 
 # Project
-*.historykof-game/
+*.history
+kof-game/

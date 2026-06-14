@@ -12,12 +12,11 @@ Implements:
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
 from typing import Optional
 
 from deepforge.config import config
-from deepforge.models.tokenizer import TokenBudget, count_tokens, count_message_tokens
-from deepforge.types import Message, Turn
+from deepforge.models.tokenizer import TokenBudget, count_tokens
+from deepforge.types import Turn
 
 
 class ContextWindow:

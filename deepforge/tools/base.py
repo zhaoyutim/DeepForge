@@ -7,7 +7,6 @@ and schema generation for the DeepSeek API.
 
 from __future__ import annotations
 
-import inspect
 import copy
 import re
 from abc import ABC, abstractmethod

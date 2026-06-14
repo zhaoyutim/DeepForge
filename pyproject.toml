@@ -45,7 +45,11 @@ browser = [
 ]
 
 [project.scripts]
-deepforge = "cli:main"
+deepforge = "tui:main"
+deepforge-cli = "cli:main"
 
 [tool.setuptools.packages.find]
 include = ["deepforge*"]
+
+[tool.setuptools]
+py-modules = ["cli", "tui"]

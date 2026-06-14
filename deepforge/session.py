@@ -15,19 +15,19 @@ This is the main entry point for interactive use.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 from deepforge.agent import Agent, AgentResponse, ApprovalCallback
-from deepforge.approval.gate import ApprovalGate, GateDecision
+from deepforge.approval.gate import ApprovalGate
 from deepforge.config import ApprovalPolicy, Mode, config
-from deepforge.constitution import HierarchyResolver, Tier, enforce_verification
+from deepforge.constitution import HierarchyResolver
 from deepforge.context.window import ContextWindow
 from deepforge.mcp.config import MCPConfig, default_mcp_config_path
 from deepforge.mcp.manager import MCPClientManager
 from deepforge.mcp.tools import build_mcp_tools
-from deepforge.models.deepseek import DeepSeekClient, get_client
+from deepforge.models.deepseek import DeepSeekClient
 from deepforge.tools.base import ToolRegistry, set_registry
 from deepforge.tools.file_tools import (
     ReadFileTool,

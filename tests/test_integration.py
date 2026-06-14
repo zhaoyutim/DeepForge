@@ -23,7 +23,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -31,7 +31,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from deepforge.config import ApprovalPolicy, Config, Mode, config
-from deepforge.constitution import HierarchyResolver, Tier, enforce_truth, enforce_verification
+from deepforge.constitution import HierarchyResolver, Tier, enforce_truth
 from deepforge.types import Message, Role, ToolCall, ToolResult, ToolSchema, Turn
 from deepforge.models.deepseek import DeepSeekClient
 from deepforge.models.tokenizer import TokenBudget, count_tokens
@@ -39,7 +39,7 @@ from deepforge.tools.base import BaseTool, ToolRegistry
 from deepforge.tools.file_tools import WriteFileTool
 from deepforge.tools.browser_tools import BrowserEvalTool, BrowserOpenTool, BrowserSnapshotTool
 from deepforge.computer.browser import BrowserElement, BrowserSnapshot
-from deepforge.approval.gate import ApprovalGate, GateDecision, GateResult
+from deepforge.approval.gate import ApprovalGate, GateDecision
 from deepforge.context.window import ContextWindow
 from deepforge.dispatch.dispatcher import ToolDispatcher
 from deepforge.mcp.config import MCPConfig, MCPToolOverride

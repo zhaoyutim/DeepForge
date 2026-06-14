@@ -18,7 +18,7 @@ from typing import Any, Optional
 from openai import OpenAI
 
 from deepforge.config import config
-from deepforge.types import Message, Role, ToolCall, ToolSchema
+from deepforge.types import Message, ToolCall, ToolSchema
 
 
 class DeepSeekClient:

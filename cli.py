@@ -26,7 +26,7 @@ from pathlib import Path
 # Add parent directory to path for development use
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from deepforge.config import ApprovalPolicy, Mode, config
+from deepforge.config import ApprovalPolicy, Mode
 from deepforge.session import Session, SessionConfig
 
 
@@ -143,7 +143,7 @@ def handle_mcp_command(parts: list[str], session: Session) -> None:
         for name in tools:
             print(f"  - {name}")
     elif subcommand == "reload":
-        status = session.reload_mcp()
+        session.reload_mcp()
         print("MCP reloaded.")
         print_mcp_status(session)
     else:

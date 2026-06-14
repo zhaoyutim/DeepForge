@@ -81,7 +81,7 @@ class ApprovalGate:
             if tool.is_write or tool.is_shell or tool.requires_approval:
                 return GateResult(
                     decision=GateDecision.BLOCK,
-                    reason=f"Plan mode: write/shell/approval-required operations are blocked.",
+                    reason="Plan mode: write/shell/approval-required operations are blocked.",
                     tool_name=tool_name,
                 )
             return GateResult(

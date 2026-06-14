@@ -6,7 +6,14 @@ setup(
     version="0.1.0",
     description="CodeWhale Architecture in Python with DeepSeek API",
     packages=find_packages(include=["deepforge", "deepforge.*"]),
+    py_modules=["cli", "tui"],
     python_requires=">=3.10",
+    entry_points={
+        "console_scripts": [
+            "deepforge = tui:main",
+            "deepforge-cli = cli:main",
+        ],
+    },
     install_requires=[
         "openai>=1.0.0",
         "tiktoken>=0.7.0",

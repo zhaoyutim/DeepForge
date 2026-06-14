@@ -9,7 +9,6 @@ Tools:
 
 from __future__ import annotations
 
-from pathlib import Path
 
 from deepforge.config import config
 from deepforge.tools.base import BaseTool

@@ -17,14 +17,13 @@ from __future__ import annotations
 import concurrent.futures
 import threading
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
-from deepforge.agent import Agent, AgentResponse
-from deepforge.config import ApprovalPolicy, Mode, config
+from deepforge.agent import Agent
+from deepforge.config import config
 from deepforge.context.window import ContextWindow
-from deepforge.models.deepseek import DeepSeekClient, get_client
-from deepforge.models.tokenizer import count_tokens
+from deepforge.models.deepseek import DeepSeekClient
 from deepforge.tools.base import ToolRegistry, get_registry
 
 

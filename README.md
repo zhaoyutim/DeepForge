@@ -84,6 +84,52 @@ cd /path/to/deepforge
 pip install -e .
 ```
 
+### Setup on a new machine from a clone
+
+After cloning the repository, install it as an editable package so the `deepforge` command is generated for your active Python environment:
+
+```bash
+git clone <your-repo-url>
+cd DeepForge
+
+# Recommended: use an isolated environment
+conda create -n deepforge python=3.12 -y
+conda activate deepforge
+
+python -m pip install -e .
+export DEEPSEEK_API_KEY="sk-your-key-here"
+```
+
+Verify the command points at the environment you just activated:
+
+```bash
+which deepforge
+deepforge --help
+```
+
+`deepforge --help` should show `DeepForge TUI — Rich Terminal Interface`. If it still shows the old CLI help or points at another environment, refresh your shell command cache and check again:
+
+```bash
+rehash   # zsh
+hash -r  # bash
+which deepforge
+```
+
+The default command launches the Rich TUI, equivalent to running `python tui.py` from this repo:
+
+```bash
+deepforge --mode yolo
+deepforge --theme worldcup
+deepforge --workspace /path/to/project
+```
+
+The legacy plain CLI remains available as `deepforge-cli`, including one-shot mode:
+
+```bash
+deepforge-cli
+deepforge-cli -c "read README.md and summarize"
+```
+
 For browser computer use, install the optional Playwright extra and Chromium:
 
 ```bash
@@ -93,11 +139,11 @@ python -m playwright install chromium
 
 ### 3. Run
 ```bash
-# Interactive CLI (terminal REPL)
+# Interactive TUI (Rich terminal interface)
 deepforge
 
-# Interactive TUI (Rich terminal interface)
-python tui.py
+# Legacy plain CLI (terminal REPL)
+deepforge-cli
 
 # Offline architecture visualization (no API key required)
 python visualize_tui.py
@@ -106,8 +152,8 @@ python visualize_tui.py
 deepforge --mode yolo
 deepforge --mode plan
 
-# One-shot command
-deepforge -c "read README.md and summarize"
+# One-shot command through the plain CLI
+deepforge-cli -c "read README.md and summarize"
 
 # Custom workspace
 deepforge --workspace /path/to/project

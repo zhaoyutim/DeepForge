@@ -26,9 +26,7 @@ import atexit
 import json
 import os
 import sys
-import time
 from pathlib import Path
-from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -36,7 +34,6 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 from rich.table import Table
-from rich.align import Align
 from rich import box
 
 from deepforge.config import ApprovalPolicy, Mode
