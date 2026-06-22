@@ -3,11 +3,14 @@ Configuration management for DeepForge.
 
 Supports:
 - Environment variables (DEEPFORGE_API_KEY, DEEPFORGE_BASE_URL, etc.)
-- YAML config file (~/.deepforge/config.yaml)
-- Programmatic override
+- YAML config file (config/env.yaml by default)
+- CLI argument override
+
+Priority: CLI args > env.yaml > environment variables > defaults
 """
 
 import os
+import sys
 from enum import Enum
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -36,28 +39,78 @@ def _env_optional_path(name: str, *legacy_names: str) -> Optional[Path]:
     return Path(value).expanduser() if value else None
 
 
+def _discover_config_path() -> Optional[Path]:
+    """Find config/env.yaml in the working directory tree."""
+    # 1. Explicit env var
+    explicit = _env_optional_path("DEEPFORGE_CONFIG", "CODEX_CONFIG")
+    if explicit and explicit.exists():
+        return explicit
+
+    # 2. project's config/env.yaml
+    cwd = Path.cwd()
+    candidate = cwd / "config" / "env.yaml"
+    if candidate.exists():
+        return candidate
+
+    # 3. ~/.deepforge/config.yaml
+    home_candidate = Path.home() / ".deepforge" / "config.yaml"
+    if home_candidate.exists():
+        return home_candidate
+
+    return None
+
+
+def _load_yaml_config(config_path: Optional[Path]) -> dict:
+    """Load a YAML config file, returning empty dict on any failure."""
+    if config_path is None or not config_path.exists():
+        return {}
+    try:
+        import yaml
+        with open(config_path, "r") as f:
+            data = yaml.safe_load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
 class Mode(str, Enum):
     """Agent operation mode."""
-    AGENT = "agent"    # Autonomous task execution
-    PLAN = "plan"      # Design before implementing (read-only)
-    YOLO = "yolo"      # Full autonomy, all actions pre-approved
+    AGENT = "agent"      # Autonomous task execution
+    PLAN = "plan"        # Design before implementing (read-only)
+    YOLO = "yolo"        # Full autonomy, all actions pre-approved
 
 
 class ApprovalPolicy(str, Enum):
     """Tool execution approval policy."""
-    AUTO = "auto"      # All tools auto-approved
+    AUTO = "auto"        # All tools auto-approved
     SUGGEST = "suggest"  # Write tools require approval
-    NEVER = "never"    # All writes blocked
+    NEVER = "never"      # All writes blocked
+
+
+class Backend(str, Enum):
+    """Model backend provider."""
+    DEEPSEEK = "deepseek"
+    AZURE = "azure"
 
 
 @dataclass
 class Config:
     """Global configuration for a DeepForge session."""
 
+    # ── Backend Selection ────────────────────────────────────
+    backend: Backend = Backend.DEEPSEEK
+
     # ── DeepSeek API ──────────────────────────────────────────
     api_key: str = field(default_factory=lambda: _env("DEEPFORGE_API_KEY", "", "DEEPSEEK_API_KEY", "CODEX_API_KEY"))
     api_base_url: str = field(default_factory=lambda: _env("DEEPFORGE_BASE_URL", "https://api.deepseek.com/v1", "CODEX_BASE_URL"))
     model: str = "deepseek-chat"  # or deepseek-reasoner for R1
+
+    # ── Azure OpenAI API ──────────────────────────────────────
+    azure_api_key: str = field(default_factory=lambda: _env("AZURE_OPENAI_API_KEY", "", "DEEPFORGE_AZURE_API_KEY", "CODEX_AZURE_API_KEY"))
+    azure_endpoint: str = field(default_factory=lambda: _env("AZURE_OPENAI_ENDPOINT", "", "DEEPFORGE_AZURE_ENDPOINT", "CODEX_AZURE_ENDPOINT"))
+    azure_deployment: str = field(default_factory=lambda: _env("AZURE_OPENAI_DEPLOYMENT", "", "DEEPFORGE_AZURE_DEPLOYMENT", "CODEX_AZURE_DEPLOYMENT"))
+    azure_api_version: str = field(default_factory=lambda: _env("AZURE_OPENAI_API_VERSION", "2025-01-01-preview", "DEEPFORGE_AZURE_API_VERSION", "CODEX_AZURE_API_VERSION"))
+    azure_model: str = "gpt-4o"
 
     # ── Mode & Approval ───────────────────────────────────────
     mode: Mode = Mode.AGENT
@@ -98,12 +151,69 @@ class Config:
     mcp_enabled: bool = field(default_factory=lambda: _env_bool("DEEPFORGE_MCP_ENABLED", True, "CODEX_MCP_ENABLED"))
     mcp_config_path: Optional[Path] = field(default_factory=lambda: _env_optional_path("DEEPFORGE_MCP_CONFIG", "CODEX_MCP_CONFIG"))
 
+    # ── Config file path (set during loading) ─────────────────
+    config_path: Optional[Path] = None
+
+    @classmethod
+    def from_yaml(cls, config_path: Optional[Path] = None) -> "Config":
+        """
+        Load configuration from YAML + environment variables.
+
+        Args:
+            config_path: Path to YAML config file. Auto-discovered if None.
+
+        Returns:
+            Config instance with merged settings.
+        """
+        resolved_path = config_path or _discover_config_path()
+        yaml_data = _load_yaml_config(resolved_path)
+
+        # Extract top-level keys
+        backend_str = yaml_data.get("backend", "deepseek").lower()
+        backend = Backend(backend_str) if backend_str in {"deepseek", "azure"} else Backend.DEEPSEEK
+
+        mode_str = yaml_data.get("mode") or _env("DEEPFORGE_MODE", "agent", "CODEX_MODE")
+        policy_str = yaml_data.get("approval_policy") or _env("DEEPFORGE_APPROVAL", "suggest", "CODEX_APPROVAL")
+
+        # DeepSeek section
+        ds = yaml_data.get("deepseek", {}) or {}
+        # Azure section
+        az = yaml_data.get("azure", {}) or {}
+
+        return cls(
+            backend=backend,
+            config_path=resolved_path,
+            # DeepSeek
+            api_key=ds.get("api_key") or _env("DEEPFORGE_API_KEY", "", "DEEPSEEK_API_KEY", "CODEX_API_KEY"),
+            api_base_url=ds.get("base_url") or _env("DEEPFORGE_BASE_URL", "https://api.deepseek.com/v1", "CODEX_BASE_URL"),
+            model=ds.get("model") or "deepseek-chat",
+            # Azure
+            azure_api_key=az.get("api_key") or _env("AZURE_OPENAI_API_KEY", "", "DEEPFORGE_AZURE_API_KEY", "CODEX_AZURE_API_KEY"),
+            azure_endpoint=az.get("endpoint") or _env("AZURE_OPENAI_ENDPOINT", "", "DEEPFORGE_AZURE_ENDPOINT", "CODEX_AZURE_ENDPOINT"),
+            azure_deployment=az.get("deployment") or _env("AZURE_OPENAI_DEPLOYMENT", "", "DEEPFORGE_AZURE_DEPLOYMENT", "CODEX_AZURE_DEPLOYMENT"),
+            azure_api_version=az.get("api_version") or _env("AZURE_OPENAI_API_VERSION", "2025-01-01-preview", "DEEPFORGE_AZURE_API_VERSION", "CODEX_AZURE_API_VERSION"),
+            azure_model=az.get("model") or "gpt-4o",
+            # Mode & Policy
+            mode=Mode(mode_str),
+            approval_policy=ApprovalPolicy(policy_str),
+            # Workspace
+            workspace=Path(yaml_data.get("workspace")) if yaml_data.get("workspace") else Path.cwd(),
+            # Max tokens (from backend-specific config or env)
+            max_output_tokens=int(
+                ds.get("max_output_tokens")
+                or az.get("max_output_tokens")
+                or _env("DEEPFORGE_MAX_OUTPUT_TOKENS", "8192", "CODEX_MAX_OUTPUT_TOKENS")
+            ),
+        )
+
     @classmethod
     def from_env(cls) -> "Config":
-        """Load configuration from environment variables."""
+        """Load configuration from environment variables (no YAML)."""
         mode_str = _env("DEEPFORGE_MODE", "agent", "CODEX_MODE")
         policy_str = _env("DEEPFORGE_APPROVAL", "suggest", "CODEX_APPROVAL")
+        backend_str = _env("DEEPFORGE_BACKEND", "deepseek", "CODEX_BACKEND")
         return cls(
+            backend=Backend(backend_str) if backend_str in {"deepseek", "azure"} else Backend.DEEPSEEK,
             mode=Mode(mode_str),
             approval_policy=ApprovalPolicy(policy_str),
         )

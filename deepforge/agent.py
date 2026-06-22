@@ -16,11 +16,12 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
 from deepforge.approval.gate import ApprovalGate, GateDecision
 from deepforge.context.window import ContextWindow
 from deepforge.dispatch.dispatcher import ToolDispatcher
+from deepforge.models.azure import AzureClient
 from deepforge.models.deepseek import DeepSeekClient, get_client
 from deepforge.tools.base import ToolRegistry, get_registry
 from deepforge.tools.base import BaseTool
@@ -57,7 +58,7 @@ class Agent:
 
     def __init__(
         self,
-        client: Optional[DeepSeekClient] = None,
+        client: Optional[Union[DeepSeekClient, AzureClient]] = None,
         registry: Optional[ToolRegistry] = None,
         context: Optional[ContextWindow] = None,
         gate: Optional[ApprovalGate] = None,

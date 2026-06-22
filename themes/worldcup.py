@@ -8,7 +8,7 @@ Usage:
 """
 
 from themes import Theme, register
-from deepforge.config import ApprovalPolicy, Mode
+from deepforge.config import ApprovalPolicy, Backend, Mode
 
 # ── Colors ────────────────────────────────────────────────────────────
 
@@ -164,6 +164,8 @@ def render_banner(session) -> "Panel":
 
     mode_str = session.mode.value.upper()
     policy_str = session.policy.value.upper()
+    from deepforge.config import config
+    backend_str = config.backend.value.upper()
 
     # Responsive width
     tw = _term_width()
@@ -206,8 +208,8 @@ def render_banner(session) -> "Panel":
     # Separator
     text.append(f"╠{h_double}╣\n", style="bold green")
 
-    # Mode / Policy
-    line1 = f"  Mode: {mode_str:<6}  Policy: {policy_str}"
+    # Mode / Policy / Backend
+    line1 = f"  Mode: {mode_str:<6}  Policy: {policy_str:<6}  Backend: {backend_str}"
     line1 = line1[:inner_w].ljust(inner_w)
     text.append("║", style="bold green")
     text.append(line1[:18], style="bold yellow")
@@ -237,10 +239,13 @@ def render_status_bar(session) -> "Text":
     ratio_str = ctx_stats.get("usage_ratio", "0%")
     ratio = float(ratio_str.rstrip("%")) / 100 if ratio_str else 0.0
 
+    from deepforge.config import config
+
     bar = Text()
     bar.append(" ⚽ ", style="bold yellow")
     bar.append(f" {session.mode.value.upper()} ", style="bold green")
     bar.append(f" {session.policy.value.upper()} ", style="bold yellow")
+    bar.append(f" {config.backend.value.upper()} ", style="bold green")
     bar.append("  Context: ", style="dim")
     bar.append_text(_pressure_bar(pressure, ratio))
     bar.append(" ")

@@ -27,3 +27,5 @@ Thumbs.db
 # Project
 *.history
 kof-game/
+.deepseek/
+config/env.yaml

@@ -3,7 +3,7 @@ Default DeepForge theme — cyan tech aesthetic, clean panels, compact status ba
 """
 
 from themes import Theme, register
-from deepforge.config import ApprovalPolicy, Mode
+from deepforge.config import ApprovalPolicy, Backend, Mode
 
 
 # ── Colors ────────────────────────────────────────────────────────────
@@ -83,6 +83,8 @@ def render_banner(session) -> "Panel":
 
     mode_str = session.mode.value.upper()
     policy_str = session.policy.value.upper()
+    from deepforge.config import config
+    backend_str = config.backend.value.upper()
 
     # Responsive width: cap at 92, shrink for narrow terminals
     tw = _term_width()
@@ -131,10 +133,11 @@ def render_banner(session) -> "Panel":
     # Separator
     text.append(f"├{h_line}┤\n", style="dim cyan")
 
-    # Mode / Policy line
+    # Mode / Policy / Backend line
     mode_str_full = f"Mode: {mode_str}"
     policy_str_full = f"Policy: {policy_str}"
-    line1 = f"  {mode_str_full:<16}  {policy_str_full}"
+    backend_str_full = f"Backend: {backend_str}"
+    line1 = f"  {mode_str_full:<14}  {policy_str_full:<16}  {backend_str_full}"
     # Pad to inner_w
     line1 = line1[:inner_w].ljust(inner_w)
     text.append("│", style="dim cyan")
@@ -181,9 +184,12 @@ def render_status_bar(session) -> "Text":
     ratio_str = ctx_stats.get("usage_ratio", "0%")
     ratio = float(ratio_str.rstrip("%")) / 100 if ratio_str else 0.0
 
+    from deepforge.config import config
+
     bar = Text()
     bar.append(f" {session.mode.value.upper()} ", style=_mode_color(session.mode))
     bar.append(f" {session.policy.value.upper()} ", style=_policy_color(session.policy))
+    bar.append(f" {config.backend.value.upper()} ", style="dim cyan")
     bar.append("  Context: ", style="dim")
     bar.append_text(_pressure_bar(pressure, ratio))
     bar.append(" ")

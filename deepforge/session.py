@@ -17,16 +17,17 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 from deepforge.agent import Agent, AgentResponse, ApprovalCallback
 from deepforge.approval.gate import ApprovalGate
-from deepforge.config import ApprovalPolicy, Mode, config
+from deepforge.config import ApprovalPolicy, Backend, Mode, config
 from deepforge.constitution import HierarchyResolver
 from deepforge.context.window import ContextWindow
 from deepforge.mcp.config import MCPConfig, default_mcp_config_path
 from deepforge.mcp.manager import MCPClientManager
 from deepforge.mcp.tools import build_mcp_tools
+from deepforge.models.azure import AzureClient
 from deepforge.models.deepseek import DeepSeekClient
 from deepforge.tools.base import ToolRegistry, set_registry
 from deepforge.tools.file_tools import (
@@ -64,6 +65,7 @@ When the user asks you to create, implement, fix, or modify something, continue 
 Current workspace: {workspace}
 Current mode: {mode}
 Approval policy: {policy}
+Backend: {backend}
 Context usage: {context_usage}
 MCP servers: {mcp_status}
 
@@ -112,6 +114,8 @@ class SessionConfig:
     approval_policy: Optional[ApprovalPolicy] = None
     workspace: Optional[Path] = None
     model: Optional[str] = None
+    backend: Optional[str] = None
+    config_path: Optional[Path] = None
     system_prompt: Optional[str] = None
     mcp_enabled: Optional[bool] = None
     mcp_config_path: Optional[Path] = None
@@ -138,7 +142,7 @@ class Session:
         self.workspace = self.session_config.workspace or config.workspace
 
         # Core components (created on initialize)
-        self.client: Optional[DeepSeekClient] = None
+        self.client: Optional[Union[DeepSeekClient, AzureClient]] = None
         self.registry: Optional[ToolRegistry] = None
         self.context: Optional[ContextWindow] = None
         self.gate: Optional[ApprovalGate] = None
@@ -166,10 +170,24 @@ class Session:
         config.approval_policy = self.policy
         config.workspace = self.workspace
 
-        # Create components
-        self.client = DeepSeekClient(
-            model=self.session_config.model,
-        )
+        # Determine backend
+        if self.session_config.backend is not None:
+            config.backend = Backend(self.session_config.backend)
+
+        # Create model client based on backend
+        if config.backend == Backend.AZURE:
+            self.client = AzureClient(
+                api_key=config.azure_api_key,
+                endpoint=config.azure_endpoint,
+                deployment=config.azure_deployment,
+                api_version=config.azure_api_version,
+                model=self.session_config.model or config.azure_model,
+            )
+        else:
+            self.client = DeepSeekClient(
+                model=self.session_config.model or config.model,
+            )
+
         self.registry = register_default_tools(ToolRegistry())
         set_registry(self.registry)
         self.context = ContextWindow()
@@ -200,6 +218,7 @@ class Session:
             workspace=str(self.workspace),
             mode=self.mode.value,
             policy=self.policy.value,
+            backend=config.backend.value,
             context_usage=f"{self.context.usage_ratio:.0%}" if self.context else "0%",
             mcp_status=self._format_mcp_status_for_prompt(),
         )
@@ -259,9 +278,6 @@ class Session:
 
         self.total_user_messages += 1
 
-        # Constitution Article II check: truth enforcement
-        # (In practice, this is enforced by the agent using tools)
-
         # Process through agent
         response = self.agent.process(
             user_input=user_input,
@@ -270,12 +286,9 @@ class Session:
 
         # Check context pressure after the turn
         if self.context.needs_compaction:
-            # In interactive mode, we'd prompt the user
-            # For now, auto-compact if critical
             if self.context.is_critical:
                 compact_result = self.context.compact()
                 if compact_result.get("compacted"):
-                    # Update agent's context reference
                     pass
 
         return response
@@ -373,6 +386,7 @@ class Session:
         return {
             "mode": self.mode.value,
             "policy": self.policy.value,
+            "backend": config.backend.value,
             "workspace": str(self.workspace),
             "initialized": self._initialized,
             "total_messages": self.total_user_messages,
@@ -387,6 +401,7 @@ class Session:
     def __repr__(self) -> str:
         return (
             f"<Session mode={self.mode.value} policy={self.policy.value} "
+            f"backend={config.backend.value} "
             f"tools={len(self.available_tools)} "
             f"context={self.context}>"
         )

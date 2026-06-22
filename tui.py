@@ -36,7 +36,7 @@ from rich.text import Text
 from rich.table import Table
 from rich import box
 
-from deepforge.config import ApprovalPolicy, Mode
+from deepforge.config import ApprovalPolicy, Backend, Mode
 from deepforge.session import Session, SessionConfig
 from deepforge.agent import AgentResponse
 import themes
@@ -47,17 +47,31 @@ _READLINE_READY = False
 
 # ── Helpers ────────────────────────────────────────────────────────
 
-def check_api_key() -> bool:
-    if not (
-        os.environ.get("DEEPFORGE_API_KEY")
-        or os.environ.get("DEEPSEEK_API_KEY")
-        or os.environ.get("CODEX_API_KEY")
-    ):
+def check_api_key(backend: str = "deepseek") -> bool:
+    if backend == "azure":
+        key = (
+            os.environ.get("AZURE_OPENAI_API_KEY")
+            or os.environ.get("DEEPFORGE_AZURE_API_KEY")
+            or os.environ.get("CODEX_AZURE_API_KEY")
+        )
+        key_name = "Azure OpenAI API key"
+        env_cmd = "export AZURE_OPENAI_API_KEY='your-key-here'"
+    else:
+        key = (
+            os.environ.get("DEEPFORGE_API_KEY")
+            or os.environ.get("DEEPSEEK_API_KEY")
+            or os.environ.get("CODEX_API_KEY")
+        )
+        key_name = "DeepSeek API key"
+        env_cmd = "export DEEPSEEK_API_KEY='sk-your-key-here'"
+
+    if not key:
         console.print(
             Panel(
-                "[bold red]DeepSeek API key not found![/]\n\n"
+                f"[bold red]{key_name} not found![/]\n\n"
                 "Set it with:\n"
-                "  [bold]export DEEPSEEK_API_KEY='sk-your-key-here'[/]",
+                f"  [bold]{env_cmd}[/]\n\n"
+                "Or configure via [bold]config/env.yaml[/]",
                 title="❌ Configuration Error",
                 border_style="red",
             )
@@ -611,14 +625,19 @@ def main():
     parser.add_argument("--mode", choices=["agent", "plan", "yolo"], default=None)
     parser.add_argument("--policy", choices=["auto", "suggest", "never"], default=None)
     parser.add_argument("--workspace", "-w", default=None)
-    parser.add_argument("--model", default=None)
+    parser.add_argument("--model", default=None,
+                        help="Model to use (default: deepseek-chat for DeepSeek, gpt-4o for Azure)")
+    parser.add_argument("--backend", "-b", choices=["deepseek", "azure"], default=None,
+                        help="Model backend: deepseek or azure (default: deepseek)")
+    parser.add_argument("--config", default=None,
+                        help="Path to env.yaml config file (default: auto-discover config/env.yaml)")
     parser.add_argument("--mcp-config", default=None,
                         help="MCP config path (default: ~/.deepforge/mcp.yaml)")
     parser.add_argument("--no-mcp", action="store_true",
                         help="Disable MCP integration for this session")
     parser.add_argument("--version", "-v", action="store_true")
     parser.add_argument("--theme", default="default",
-                        help="Visual theme (default, worldcup)")
+                        help="Visual theme (default, worldcup, dragonball)")
     args = parser.parse_args()
 
     if args.version:
@@ -626,7 +645,16 @@ def main():
         console.print(f"DeepForge v{__version__}")
         return
 
-    if not check_api_key():
+    # Determine backend (CLI arg > config file > env var > default)
+    resolved_backend = args.backend
+    if resolved_backend is None:
+        config_path = Path(args.config).resolve() if args.config else None
+        from deepforge.config import _discover_config_path, _load_yaml_config
+        yaml_data = _load_yaml_config(config_path or _discover_config_path())
+        resolved_backend = yaml_data.get("backend", "deepseek")
+    resolved_backend = resolved_backend.lower()
+
+    if not check_api_key(resolved_backend):
         sys.exit(1)
 
     session_config = SessionConfig(
@@ -634,10 +662,30 @@ def main():
         approval_policy=ApprovalPolicy(args.policy) if args.policy else None,
         workspace=Path(args.workspace).resolve() if args.workspace else None,
         model=args.model,
+        backend=args.backend,
+        config_path=Path(args.config).resolve() if args.config else None,
         mcp_enabled=not args.no_mcp,
         mcp_config_path=Path(args.mcp_config).expanduser() if args.mcp_config else None,
         approval_callback=create_tui_approval_callback(),
     )
+
+    # Load YAML config into global config before session initialization
+    if session_config.config_path or not args.backend:
+        config_path = session_config.config_path or None
+        from deepforge.config import Config
+        yaml_config = Config.from_yaml(config_path)
+        if args.backend:
+            yaml_config.backend = Backend(args.backend)
+        if args.mode:
+            yaml_config.mode = Mode(args.mode)
+        if args.policy:
+            yaml_config.approval_policy = ApprovalPolicy(args.policy)
+        if args.workspace:
+            yaml_config.workspace = Path(args.workspace).resolve()
+        if args.model:
+            yaml_config.model = args.model
+        from deepforge import config as config_module
+        config_module.config = yaml_config
 
     session = Session(session_config=session_config)
     try:
