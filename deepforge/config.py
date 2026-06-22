@@ -111,6 +111,8 @@ class Config:
     azure_deployment: str = field(default_factory=lambda: _env("AZURE_OPENAI_DEPLOYMENT", "", "DEEPFORGE_AZURE_DEPLOYMENT", "CODEX_AZURE_DEPLOYMENT"))
     azure_api_version: str = field(default_factory=lambda: _env("AZURE_OPENAI_API_VERSION", "2025-01-01-preview", "DEEPFORGE_AZURE_API_VERSION", "CODEX_AZURE_API_VERSION"))
     azure_model: str = "gpt-4o"
+    azure_context_tokens: int = 262144  # 256K — GPT-5.x default; 128000 for GPT-4o
+    azure_reasoning_effort: Optional[str] = None  # "low", "medium", "high", "xhigh"
 
     # ── Mode & Approval ───────────────────────────────────────
     mode: Mode = Mode.AGENT
@@ -193,6 +195,8 @@ class Config:
             azure_deployment=az.get("deployment") or _env("AZURE_OPENAI_DEPLOYMENT", "", "DEEPFORGE_AZURE_DEPLOYMENT", "CODEX_AZURE_DEPLOYMENT"),
             azure_api_version=az.get("api_version") or _env("AZURE_OPENAI_API_VERSION", "2025-01-01-preview", "DEEPFORGE_AZURE_API_VERSION", "CODEX_AZURE_API_VERSION"),
             azure_model=az.get("model") or "gpt-4o",
+            azure_context_tokens=int(az.get("context_window", 262144)),
+            azure_reasoning_effort=az.get("reasoning_effort"),
             # Mode & Policy
             mode=Mode(mode_str),
             approval_policy=ApprovalPolicy(policy_str),

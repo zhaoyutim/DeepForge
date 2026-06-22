@@ -182,6 +182,7 @@ class Session:
                 deployment=config.azure_deployment,
                 api_version=config.azure_api_version,
                 model=self.session_config.model or config.azure_model,
+                reasoning_effort=config.azure_reasoning_effort,
             )
         else:
             self.client = DeepSeekClient(
@@ -190,7 +191,13 @@ class Session:
 
         self.registry = register_default_tools(ToolRegistry())
         set_registry(self.registry)
-        self.context = ContextWindow()
+        # Use Azure-specific context window size when on Azure backend
+        context_tokens = (
+            config.azure_context_tokens
+            if config.backend == Backend.AZURE
+            else config.max_context_tokens
+        )
+        self.context = ContextWindow(max_tokens=context_tokens)
         self.gate = ApprovalGate(mode=self.mode, policy=self.policy)
 
         self._initialize_mcp()
@@ -383,6 +390,7 @@ class Session:
 
     def stats(self) -> dict:
         """Session statistics."""
+        ctx_stats = self.get_context_stats()
         return {
             "mode": self.mode.value,
             "policy": self.policy.value,
@@ -392,7 +400,10 @@ class Session:
             "total_messages": self.total_user_messages,
             "tools_available": len(self.available_tools),
             "mcp": self.mcp_status(),
-            "context": self.get_context_stats(),
+            "context": ctx_stats,
+            "reasoning_effort": getattr(self.client, "reasoning_effort", None) if self.client else None,
+            "azure_context_tokens": config.azure_context_tokens,
+            "effective_context_tokens": ctx_stats.get("max_tokens", 0),
             "uptime_seconds": time.time() - self.session_start_time if self.session_start_time else 0,
             "api_requests": self.client.total_requests if self.client else 0,
             "api_tokens_used": self.client.total_tokens_used if self.client else 0,

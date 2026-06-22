@@ -216,6 +216,20 @@ def render_banner(session) -> "Panel":
     text.append(line2, style="#00BCD4")
     text.append("║\n", style="bold #FFD700")
 
+    # ── Context window / Reasoning effort (Azure-specific) ──
+    if config.backend == Backend.AZURE:
+        ctx_tokens = config.azure_context_tokens
+        ctx_k = f"{ctx_tokens // 1024}K"
+        effort = getattr(session.agent.client, "reasoning_effort", None) if session.agent and session.agent.client else None
+        parts = f"  ⚡ Context: {ctx_k}"
+        if effort:
+            parts += f"  🔥 Eff: {effort}"
+        line3 = f"  {parts}"
+        line3 = line3[:inner_w].ljust(inner_w)
+        text.append("║", style="bold #FFD700")
+        text.append(line3, style="#FF6B35")
+        text.append("║\n", style="bold #FFD700")
+
     # ── Commands line ──
     if inner_w >= 50:
         cmds = "/mode /policy /tools /mcp /stats /compact /help /exit /theme"
@@ -251,7 +265,7 @@ def render_status_bar(session) -> "Text":
     }
     icon = mode_icons.get(session.mode, "⚪")
 
-    from deepforge.config import config
+    from deepforge.config import Backend, config
 
     bar = Text()
     bar.append(f" {icon} ", style="bold #FFD700")
@@ -260,6 +274,10 @@ def render_status_bar(session) -> "Text":
     bar.append(f" {session.policy.value.upper()} ", style=f"{_policy_color(session.policy)} on #1a0a00")
     bar.append(" ")
     bar.append(f" {config.backend.value.upper()} ", style=f"bold #FFD700 on #1a0a00")
+    # Show reasoning effort if set
+    effort = getattr(session.agent.client, "reasoning_effort", None) if session.agent and session.agent.client else None
+    if effort:
+        bar.append(f" 🔥{effort} ", style="bold #FF6B35 on #1a0a00")
     bar.append("  ⚡ Context: ", style="dim #FFD700")
     bar.append_text(_pressure_bar(pressure, ratio))
     bar.append(" ")

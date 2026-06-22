@@ -154,6 +154,21 @@ def render_banner(session) -> "Panel":
     text.append(line2, style="dim")
     text.append("│\n", style="dim cyan")
 
+    # Context window / Reasoning effort line (Azure-specific)
+    from deepforge.config import Backend as _Backend
+    if config.backend == _Backend.AZURE:
+        ctx_tokens = config.azure_context_tokens
+        ctx_k = f"{ctx_tokens // 1024}K"
+        effort = getattr(session.agent.client, "reasoning_effort", None) if session.agent and session.agent.client else None
+        parts = f"Context: {ctx_k}"
+        if effort:
+            parts += f"  Eff: {effort}"
+        line3 = f"  {parts}"
+        line3 = line3[:inner_w].ljust(inner_w)
+        text.append("│", style="dim cyan")
+        text.append(line3, style="dim magenta")
+        text.append("│\n", style="dim cyan")
+
     # Separator
     text.append(f"├{h_line}┤\n", style="dim cyan")
 
@@ -184,12 +199,17 @@ def render_status_bar(session) -> "Text":
     ratio_str = ctx_stats.get("usage_ratio", "0%")
     ratio = float(ratio_str.rstrip("%")) / 100 if ratio_str else 0.0
 
-    from deepforge.config import config
+    from deepforge.config import Backend, config
+    is_azure = config.backend == Backend.AZURE
 
     bar = Text()
     bar.append(f" {session.mode.value.upper()} ", style=_mode_color(session.mode))
     bar.append(f" {session.policy.value.upper()} ", style=_policy_color(session.policy))
     bar.append(f" {config.backend.value.upper()} ", style="dim cyan")
+    # Show reasoning effort on Azure (or any backend that has it set)
+    effort = getattr(session.agent.client, "reasoning_effort", None) if session.agent and session.agent.client else None
+    if effort:
+        bar.append(f"🧠{effort} ", style="bold magenta")
     bar.append("  Context: ", style="dim")
     bar.append_text(_pressure_bar(pressure, ratio))
     bar.append(" ")

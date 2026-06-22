@@ -34,10 +34,12 @@ class DeepSeekClient:
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         model: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
     ):
         self.api_key = api_key or config.api_key
         self.base_url = base_url or config.api_base_url
         self.model = model or config.model
+        self.reasoning_effort = reasoning_effort
 
         if not self.api_key:
             raise ValueError(
@@ -128,14 +130,17 @@ class DeepSeekClient:
         start_time = time.time()
 
         try:
-            response = self._client.chat.completions.create(
-                model=self.model,
-                messages=api_messages,
-                tools=api_tools,
-                temperature=temperature,
-                max_tokens=max_tokens or config.max_output_tokens,
-                stream=stream,
-            )
+            kwargs: dict[str, Any] = {
+                "model": self.model,
+                "messages": api_messages,
+                "tools": api_tools,
+                "temperature": temperature,
+                "max_tokens": max_tokens or config.max_output_tokens,
+                "stream": stream,
+            }
+            if self.reasoning_effort:
+                kwargs["reasoning_effort"] = self.reasoning_effort
+            response = self._client.chat.completions.create(**kwargs)
         except Exception as e:
             return {
                 "content": None,
@@ -225,15 +230,18 @@ class DeepSeekClient:
         start_time = time.time()
 
         try:
-            stream = self._client.chat.completions.create(
-                model=self.model,
-                messages=api_messages,
-                tools=api_tools,
-                temperature=temperature,
-                max_tokens=max_tokens or config.max_output_tokens,
-                stream=True,
-                stream_options={"include_usage": True},
-            )
+            kwargs: dict[str, Any] = {
+                "model": self.model,
+                "messages": api_messages,
+                "tools": api_tools,
+                "temperature": temperature,
+                "max_tokens": max_tokens or config.max_output_tokens,
+                "stream": True,
+                "stream_options": {"include_usage": True},
+            }
+            if self.reasoning_effort:
+                kwargs["reasoning_effort"] = self.reasoning_effort
+            stream = self._client.chat.completions.create(**kwargs)
         except Exception as e:
             yield {"type": "error", "error": str(e)}
             return

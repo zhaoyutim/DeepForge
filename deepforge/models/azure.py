@@ -42,12 +42,14 @@ class AzureClient:
         deployment: Optional[str] = None,
         api_version: Optional[str] = None,
         model: Optional[str] = None,  # model = deployment for Azure
+        reasoning_effort: Optional[str] = None,
     ):
         self.api_key = api_key or config.azure_api_key
         self.endpoint = endpoint or config.azure_endpoint
         self.deployment = deployment or model or config.azure_deployment
         self.api_version = api_version or config.azure_api_version
         self.model = self.deployment  # Keep model attr for compat
+        self.reasoning_effort = reasoning_effort or config.azure_reasoning_effort
 
         if not self.api_key:
             raise ValueError(
@@ -146,14 +148,17 @@ class AzureClient:
         start_time = time.time()
 
         try:
-            response = self._client.chat.completions.create(
-                model=self.deployment,
-                messages=api_messages,
-                tools=api_tools,
-                temperature=temperature,
-                max_tokens=max_tokens or config.max_output_tokens,
-                stream=stream,
-            )
+            kwargs: dict[str, Any] = {
+                "model": self.deployment,
+                "messages": api_messages,
+                "tools": api_tools,
+                "temperature": temperature,
+                "max_tokens": max_tokens or config.max_output_tokens,
+                "stream": stream,
+            }
+            if self.reasoning_effort:
+                kwargs["reasoning_effort"] = self.reasoning_effort
+            response = self._client.chat.completions.create(**kwargs)
         except Exception as e:
             return {
                 "content": None,
@@ -232,15 +237,18 @@ class AzureClient:
         start_time = time.time()
 
         try:
-            stream = self._client.chat.completions.create(
-                model=self.deployment,
-                messages=api_messages,
-                tools=api_tools,
-                temperature=temperature,
-                max_tokens=max_tokens or config.max_output_tokens,
-                stream=True,
-                stream_options={"include_usage": True},
-            )
+            kwargs: dict[str, Any] = {
+                "model": self.deployment,
+                "messages": api_messages,
+                "tools": api_tools,
+                "temperature": temperature,
+                "max_tokens": max_tokens or config.max_output_tokens,
+                "stream": True,
+                "stream_options": {"include_usage": True},
+            }
+            if self.reasoning_effort:
+                kwargs["reasoning_effort"] = self.reasoning_effort
+            stream = self._client.chat.completions.create(**kwargs)
         except Exception as e:
             yield {"type": "error", "error": str(e)}
             return
