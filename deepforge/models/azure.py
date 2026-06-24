@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import time
 from typing import Any, Optional
+from urllib.parse import parse_qs, urlparse, urlunparse
 
 from openai import AzureOpenAI
 
@@ -38,6 +39,7 @@ class AzureClient:
     def __init__(
         self,
         api_key: Optional[str] = None,
+        api_url: Optional[str] = None,
         endpoint: Optional[str] = None,
         deployment: Optional[str] = None,
         api_version: Optional[str] = None,
@@ -45,33 +47,43 @@ class AzureClient:
         reasoning_effort: Optional[str] = None,
     ):
         self.api_key = api_key or config.azure_api_key
+        self.api_url = api_url or config.azure_api_url
         self.endpoint = endpoint or config.azure_endpoint
-        self.deployment = deployment or model or config.azure_deployment
+        self.deployment = deployment or model or config.azure_deployment or config.azure_model
         self.api_version = api_version or config.azure_api_version
         self.model = self.deployment  # Keep model attr for compat
         self.reasoning_effort = reasoning_effort or config.azure_reasoning_effort
+        self.uses_responses_api = bool(self.api_url)
 
         if not self.api_key:
             raise ValueError(
                 "Azure API key not found. Set AZURE_OPENAI_API_KEY environment variable "
                 "or configure azure.api_key in env.yaml."
             )
-        if not self.endpoint:
+        if self.api_url:
+            self.endpoint, self.api_version = self._parse_api_url(self.api_url, self.api_version)
+        elif not self.endpoint:
             raise ValueError(
                 "Azure endpoint not found. Set AZURE_OPENAI_ENDPOINT environment variable "
-                "or configure azure.endpoint in env.yaml."
+                "or configure azure.endpoint in env.yaml. For a full Responses API URL, "
+                "configure azure.api_url instead."
             )
         if not self.deployment:
             raise ValueError(
-                "Azure deployment name not found. Set AZURE_OPENAI_DEPLOYMENT environment variable "
-                "or configure azure.deployment in env.yaml."
+                "Azure model/deployment not found. Set AZURE_OPENAI_DEPLOYMENT or configure "
+                "azure.deployment / azure.model in env.yaml."
             )
 
-        self._client = AzureOpenAI(
-            api_key=self.api_key,
-            azure_endpoint=self.endpoint,
-            api_version=self.api_version,
-        )
+        client_kwargs: dict[str, Any] = {
+            "api_key": self.api_key,
+            "api_version": self.api_version,
+        }
+        if self.uses_responses_api:
+            client_kwargs["base_url"] = self.endpoint
+        else:
+            client_kwargs["azure_endpoint"] = self.endpoint
+
+        self._client = AzureOpenAI(**client_kwargs)
 
         # Statistics (same interface as DeepSeekClient)
         self.total_tokens_used: int = 0
@@ -101,6 +113,120 @@ class AzureClient:
                 "_raw_arguments_length": len(raw_arguments),
             }
         return parsed if isinstance(parsed, dict) else {"_tool_parse_error": f"Invalid tool arguments for {function_name}: expected JSON object"}
+
+    @staticmethod
+    def _parse_api_url(api_url: str, fallback_api_version: str) -> tuple[str, str]:
+        """Split a full Azure Responses API URL into SDK base_url + api_version."""
+        parsed = urlparse(api_url)
+        if not parsed.scheme or not parsed.netloc:
+            raise ValueError(
+                "azure.api_url must be a full URL, for example "
+                "https://xxx.com/api/.../openai/responses?api-version=2025-04-01-preview"
+            )
+
+        path = parsed.path.rstrip("/")
+        if path.endswith("/responses"):
+            path = path[: -len("/responses")]
+        if not path:
+            path = "/"
+
+        query = parse_qs(parsed.query)
+        api_version = (query.get("api-version") or [fallback_api_version])[0]
+        base_url = urlunparse((parsed.scheme, parsed.netloc, path.rstrip("/") + "/", "", "", ""))
+        return base_url, api_version
+
+    @staticmethod
+    def _responses_input(messages: list[Message]) -> list[dict[str, Any]]:
+        """Convert DeepForge's chat-style conversation into Responses API input items."""
+        items: list[dict[str, Any]] = []
+        for msg in messages:
+            api_msg = msg.to_api()
+            role = api_msg.get("role")
+            content = api_msg.get("content")
+
+            if role in {"user", "system"} and content:
+                items.append({"role": role, "content": content})
+            elif role == "assistant":
+                if content:
+                    items.append({"role": "assistant", "content": content})
+                for tc in msg.tool_calls:
+                    items.append({
+                        "type": "function_call",
+                        "call_id": tc.id,
+                        "name": tc.function_name,
+                        "arguments": json.dumps(tc.arguments, ensure_ascii=False),
+                        "status": "completed",
+                    })
+            elif role == "tool" and msg.tool_call_id:
+                items.append({
+                    "type": "function_call_output",
+                    "call_id": msg.tool_call_id,
+                    "output": content or "",
+                    "status": "completed",
+                })
+        return items
+
+    @staticmethod
+    def _responses_tools(tools: Optional[list[ToolSchema]]) -> Optional[list[dict[str, Any]]]:
+        if not tools:
+            return None
+        api_tools: list[dict[str, Any]] = []
+        for tool in tools:
+            api_tools.append({
+                "type": "function",
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.parameters,
+                "strict": False,
+            })
+        return api_tools
+
+    @staticmethod
+    def _response_text(response: Any) -> str:
+        output_text = getattr(response, "output_text", None)
+        if output_text:
+            return output_text
+
+        parts: list[str] = []
+        for item in getattr(response, "output", []) or []:
+            if getattr(item, "type", None) != "message":
+                continue
+            for content in getattr(item, "content", []) or []:
+                text = getattr(content, "text", None)
+                if text:
+                    parts.append(text)
+        return "".join(parts)
+
+    def _parse_responses_response(self, response: Any, start_time: float) -> dict:
+        content = self._response_text(response)
+        tool_calls: list[ToolCall] = []
+        for item in getattr(response, "output", []) or []:
+            if getattr(item, "type", None) != "function_call":
+                continue
+            function_name = getattr(item, "name", "unknown")
+            tool_calls.append(ToolCall(
+                id=getattr(item, "call_id", None) or getattr(item, "id", None) or "",
+                function_name=function_name,
+                arguments=self._parse_tool_arguments(getattr(item, "arguments", "{}"), function_name),
+            ))
+
+        usage = getattr(response, "usage", None)
+        prompt_tokens = getattr(usage, "input_tokens", 0) if usage else 0
+        completion_tokens = getattr(usage, "output_tokens", 0) if usage else 0
+        total_tokens = getattr(usage, "total_tokens", 0) if usage else 0
+        self.total_tokens_used += total_tokens
+
+        return {
+            "content": content or None,
+            "tool_calls": tool_calls,
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens,
+            },
+            "finish_reason": getattr(response, "status", None) or "stop",
+            "latency_ms": (time.time() - start_time) * 1000,
+        }
 
     # ── Core API Call ──────────────────────────────────────────────
 
@@ -146,6 +272,33 @@ class AzureClient:
 
         self.total_requests += 1
         start_time = time.time()
+
+        if self.uses_responses_api:
+            try:
+                kwargs: dict[str, Any] = {
+                    "model": self.model,
+                    "input": self._responses_input(messages),
+                    "temperature": temperature,
+                    "max_output_tokens": max_tokens or config.max_output_tokens,
+                }
+                if system_prompt:
+                    kwargs["instructions"] = system_prompt
+                response_tools = self._responses_tools(tools)
+                if response_tools:
+                    kwargs["tools"] = response_tools
+                if self.reasoning_effort:
+                    kwargs["reasoning"] = {"effort": self.reasoning_effort}
+                response = self._client.responses.create(**kwargs)
+                return self._parse_responses_response(response, start_time)
+            except Exception as e:
+                return {
+                    "content": None,
+                    "tool_calls": [],
+                    "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                    "finish_reason": "error",
+                    "error": str(e),
+                    "latency_ms": (time.time() - start_time) * 1000,
+                }
 
         try:
             kwargs: dict[str, Any] = {
@@ -232,6 +385,31 @@ class AzureClient:
         api_tools = None
         if tools:
             api_tools = [t.to_openai_schema() for t in tools]
+
+        if self.uses_responses_api:
+            response = self.chat(
+                messages=messages,
+                tools=tools,
+                system_prompt=system_prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=False,
+            )
+            if response.get("error"):
+                yield {"type": "error", "error": response["error"]}
+                return
+            if response.get("content"):
+                yield {"type": "text", "content": response["content"]}
+            for tool_call in response.get("tool_calls", []):
+                yield {"type": "tool_call", "tool_call": tool_call}
+            yield {
+                "type": "done",
+                "content": response.get("content"),
+                "usage": response.get("usage", {}),
+                "finish_reason": response.get("finish_reason", "stop"),
+                "latency_ms": response.get("latency_ms", 0),
+            }
+            return
 
         self.total_requests += 1
         start_time = time.time()

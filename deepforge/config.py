@@ -107,11 +107,12 @@ class Config:
 
     # ── Azure OpenAI API ──────────────────────────────────────
     azure_api_key: str = field(default_factory=lambda: _env("AZURE_OPENAI_API_KEY", "", "DEEPFORGE_AZURE_API_KEY", "CODEX_AZURE_API_KEY"))
+    azure_api_url: str = field(default_factory=lambda: _env("AZURE_OPENAI_API_URL", "", "DEEPFORGE_AZURE_API_URL", "CODEX_AZURE_API_URL"))
     azure_endpoint: str = field(default_factory=lambda: _env("AZURE_OPENAI_ENDPOINT", "", "DEEPFORGE_AZURE_ENDPOINT", "CODEX_AZURE_ENDPOINT"))
     azure_deployment: str = field(default_factory=lambda: _env("AZURE_OPENAI_DEPLOYMENT", "", "DEEPFORGE_AZURE_DEPLOYMENT", "CODEX_AZURE_DEPLOYMENT"))
     azure_api_version: str = field(default_factory=lambda: _env("AZURE_OPENAI_API_VERSION", "2025-01-01-preview", "DEEPFORGE_AZURE_API_VERSION", "CODEX_AZURE_API_VERSION"))
-    azure_model: str = "gpt-4o"
-    azure_context_tokens: int = 262144  # 256K — GPT-5.x default; 128000 for GPT-4o
+    azure_model: str = "gpt5.4"
+    azure_context_tokens: int = 262144  # 256K — GPT-5.x default; 128000 for GPT-5.4
     azure_reasoning_effort: Optional[str] = None  # "low", "medium", "high", "xhigh"
 
     # ── Mode & Approval ───────────────────────────────────────
@@ -157,7 +158,7 @@ class Config:
     config_path: Optional[Path] = None
 
     @classmethod
-    def from_yaml(cls, config_path: Optional[Path] = None) -> "Config":
+    def from_yaml(cls, config_path: Optional[Path | str] = None) -> "Config":
         """
         Load configuration from YAML + environment variables.
 
@@ -167,7 +168,8 @@ class Config:
         Returns:
             Config instance with merged settings.
         """
-        resolved_path = config_path or _discover_config_path()
+        resolved_path = Path(config_path).expanduser() if isinstance(config_path, str) else config_path
+        resolved_path = resolved_path or _discover_config_path()
         yaml_data = _load_yaml_config(resolved_path)
 
         # Extract top-level keys
@@ -191,10 +193,11 @@ class Config:
             model=ds.get("model") or "deepseek-chat",
             # Azure
             azure_api_key=az.get("api_key") or _env("AZURE_OPENAI_API_KEY", "", "DEEPFORGE_AZURE_API_KEY", "CODEX_AZURE_API_KEY"),
+            azure_api_url=az.get("api_url") or az.get("responses_url") or _env("AZURE_OPENAI_API_URL", "", "DEEPFORGE_AZURE_API_URL", "CODEX_AZURE_API_URL"),
             azure_endpoint=az.get("endpoint") or _env("AZURE_OPENAI_ENDPOINT", "", "DEEPFORGE_AZURE_ENDPOINT", "CODEX_AZURE_ENDPOINT"),
             azure_deployment=az.get("deployment") or _env("AZURE_OPENAI_DEPLOYMENT", "", "DEEPFORGE_AZURE_DEPLOYMENT", "CODEX_AZURE_DEPLOYMENT"),
             azure_api_version=az.get("api_version") or _env("AZURE_OPENAI_API_VERSION", "2025-01-01-preview", "DEEPFORGE_AZURE_API_VERSION", "CODEX_AZURE_API_VERSION"),
-            azure_model=az.get("model") or "gpt-4o",
+            azure_model=az.get("model") or "gpt5.4",
             azure_context_tokens=int(az.get("context_window", 262144)),
             azure_reasoning_effort=az.get("reasoning_effort"),
             # Mode & Policy

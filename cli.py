@@ -34,10 +34,14 @@ from deepforge.config import ApprovalPolicy, Backend, Mode, config
 from deepforge.session import Session, SessionConfig
 
 
-def check_api_key(backend: str = "deepseek") -> bool:
+def check_api_key(backend: str = "deepseek", yaml_data: dict | None = None) -> bool:
     """Check if the API key is configured for the given backend."""
+    yaml_data = yaml_data or {}
     if backend == "azure":
+        az = yaml_data.get("azure", {}) or {}
         key = (
+            az.get("api_key")
+            or
             os.environ.get("AZURE_OPENAI_API_KEY")
             or os.environ.get("DEEPFORGE_AZURE_API_KEY")
             or os.environ.get("CODEX_AZURE_API_KEY")
@@ -46,7 +50,10 @@ def check_api_key(backend: str = "deepseek") -> bool:
         env_example = "export AZURE_OPENAI_API_KEY='your-key-here'"
         get_key_url = "https://portal.azure.com"
     else:
+        ds = yaml_data.get("deepseek", {}) or {}
         key = (
+            ds.get("api_key")
+            or
             os.environ.get("DEEPFORGE_API_KEY")
             or os.environ.get("DEEPSEEK_API_KEY")
             or os.environ.get("CODEX_API_KEY")
@@ -339,7 +346,7 @@ def main():
     parser.add_argument(
         "--model",
         default=None,
-        help="Model to use (default: deepseek-chat for DeepSeek, gpt-4o for Azure)",
+        help="Model to use (default: deepseek-chat for DeepSeek, gpt5.4 for Azure)",
     )
     parser.add_argument(
         "--backend", "-b",
@@ -376,16 +383,16 @@ def main():
 
     # Determine backend (CLI arg > config file > env var > default)
     resolved_backend = args.backend
+    config_path = Path(args.config).resolve() if args.config else None
+    from deepforge.config import _discover_config_path, _load_yaml_config
+    yaml_data = _load_yaml_config(config_path or _discover_config_path())
     if resolved_backend is None:
         # Try to load YAML to get backend early (for API key check)
-        config_path = Path(args.config).resolve() if args.config else None
-        from deepforge.config import _discover_config_path, _load_yaml_config
-        yaml_data = _load_yaml_config(config_path or _discover_config_path())
         resolved_backend = yaml_data.get("backend", "deepseek")
     resolved_backend = resolved_backend.lower()
 
     # Check API key for resolved backend
-    if not check_api_key(resolved_backend):
+    if not check_api_key(resolved_backend, yaml_data):
         sys.exit(1)
 
     # Build session config
@@ -418,8 +425,7 @@ def main():
         if args.model:
             yaml_config.model = args.model
         # Replace global config
-        from deepforge import config as config_module
-        config_module.config = yaml_config
+        config.__dict__.update(yaml_config.__dict__)
 
     # Create and initialize session
     session = Session(session_config=session_config)

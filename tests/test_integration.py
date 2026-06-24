@@ -19,6 +19,7 @@ Run with:
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -34,6 +35,7 @@ from deepforge.config import ApprovalPolicy, Config, Mode, config
 from deepforge.constitution import HierarchyResolver, Tier, enforce_truth
 from deepforge.types import Message, Role, ToolCall, ToolResult, ToolSchema, Turn
 from deepforge.models.deepseek import DeepSeekClient
+from deepforge.models.azure import AzureClient
 from deepforge.models.tokenizer import TokenBudget, count_tokens
 from deepforge.tools.base import BaseTool, ToolRegistry
 from deepforge.tools.file_tools import WriteFileTool
@@ -167,6 +169,23 @@ class TestConfig:
         assert ApprovalPolicy("suggest") == ApprovalPolicy.SUGGEST
         assert ApprovalPolicy("never") == ApprovalPolicy.NEVER
 
+    def test_yaml_azure_responses_url(self, tmp_path):
+        cfg_path = tmp_path / "env.yaml"
+        cfg_path.write_text(
+            "backend: azure\n"
+            "azure:\n"
+            "  api_key: test-key\n"
+            "  api_url: https://xxx.com/api/dv-exp-sandboxkey-openai-api/1/openai/responses?api-version=2025-04-01-preview\n"
+            "  model: gpt5.4\n",
+        )
+
+        cfg = Config.from_yaml(cfg_path)
+
+        assert cfg.backend.value == "azure"
+        assert cfg.azure_api_key == "test-key"
+        assert cfg.azure_api_url.endswith("api-version=2025-04-01-preview")
+        assert cfg.azure_model == "gpt5.4"
+
 
 class TestTypes:
     def test_message_creation(self):
@@ -217,6 +236,40 @@ class TestTypes:
             assistant_message=Message.assistant("Hi there"),
         )
         assert turn.total_tokens > 0
+
+
+class TestAzureClient:
+    def test_responses_api_url_parsing(self):
+        base_url, api_version = AzureClient._parse_api_url(
+            "https://xxx.com/api/dv-exp-sandboxkey-openai-api/1/openai/responses?api-version=2025-04-01-preview",
+            "fallback",
+        )
+
+        assert base_url == "https://xxx.com/api/dv-exp-sandboxkey-openai-api/1/openai/"
+        assert api_version == "2025-04-01-preview"
+
+    def test_responses_input_includes_function_outputs(self):
+        messages = [
+            Message.user("Use a tool"),
+            Message.assistant(tool_calls=[
+                ToolCall(id="call_1", function_name="read_file", arguments={"path": "README.md"}),
+            ]),
+            Message.tool_result(ToolResult(tool_call_id="call_1", content="contents")),
+        ]
+
+        items = AzureClient._responses_input(messages)
+
+        assert items[0] == {"role": "user", "content": "Use a tool"}
+        assert items[1]["type"] == "function_call"
+        assert items[1]["call_id"] == "call_1"
+        assert items[1]["name"] == "read_file"
+        assert json.loads(items[1]["arguments"]) == {"path": "README.md"}
+        assert items[2] == {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "contents",
+            "status": "completed",
+        }
 
 
 # ═══════════════════════════════════════════════════════════════════

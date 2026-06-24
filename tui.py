@@ -23,20 +23,32 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import codecs
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+import getpass
 import json
 import os
+import select
 import sys
+import termios
+import textwrap
+import time
+import tty
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from rich.console import Console
+from rich.console import Console, Group
+from rich.layout import Layout
+from rich.live import Live
+from rich.padding import Padding
 from rich.panel import Panel
 from rich.text import Text
 from rich.table import Table
 from rich import box
 
-from deepforge.config import ApprovalPolicy, Backend, Mode
+from deepforge.config import ApprovalPolicy, Backend, Mode, config
 from deepforge.session import Session, SessionConfig
 from deepforge.agent import AgentResponse
 import themes
@@ -47,9 +59,13 @@ _READLINE_READY = False
 
 # ── Helpers ────────────────────────────────────────────────────────
 
-def check_api_key(backend: str = "deepseek") -> bool:
+def check_api_key(backend: str = "deepseek", yaml_data: dict | None = None) -> bool:
+    yaml_data = yaml_data or {}
     if backend == "azure":
+        az = yaml_data.get("azure", {}) or {}
         key = (
+            az.get("api_key")
+            or
             os.environ.get("AZURE_OPENAI_API_KEY")
             or os.environ.get("DEEPFORGE_AZURE_API_KEY")
             or os.environ.get("CODEX_AZURE_API_KEY")
@@ -57,7 +73,10 @@ def check_api_key(backend: str = "deepseek") -> bool:
         key_name = "Azure OpenAI API key"
         env_cmd = "export AZURE_OPENAI_API_KEY='your-key-here'"
     else:
+        ds = yaml_data.get("deepseek", {}) or {}
         key = (
+            ds.get("api_key")
+            or
             os.environ.get("DEEPFORGE_API_KEY")
             or os.environ.get("DEEPSEEK_API_KEY")
             or os.environ.get("CODEX_API_KEY")
@@ -290,10 +309,742 @@ class ToolProgressDisplay:
             self.progress.update(task_id, description=f"[{style}]{symbol} Done[/]")
 
 
+# ── CodeWhale-style Shell ────────────────────────────────────────────
+
+BG = "default"
+SURFACE = "default"
+SURFACE_HI = "default"
+BORDER = "#24508A"
+BORDER_DIM = "#17345F"
+BLUE = "#58A6FF"
+CYAN = "#3DD6D0"
+GREEN = "#37E58F"
+YELLOW = "#F4B74A"
+ORANGE = "#D98A35"
+MUTED = "#7E8CA6"
+TEXT = "#D7E4F5"
+DIM_TEXT = "#6F7D96"
+ERROR = "#FF6370"
+
+
+@dataclass
+class TranscriptBlock:
+    kind: str
+    content: str
+    style: str = TEXT
+    meta: str = ""
+
+
+@dataclass
+class TaskTurn:
+    index: int
+    status: str = "running"
+    step: str = "thinking running"
+    started_at: float = field(default_factory=time.time)
+    finished_ms: float = 0.0
+    events: list[tuple[str, str]] = field(default_factory=list)
+
+
+@contextmanager
+def raw_terminal_mode():
+    """Temporarily switch stdin to cbreak mode so Live can refresh while editing."""
+    if not sys.stdin.isatty():
+        yield
+        return
+
+    fd = sys.stdin.fileno()
+    try:
+        old_attrs = termios.tcgetattr(fd)
+    except termios.error:
+        yield
+        return
+
+    try:
+        tty.setcbreak(fd)
+        yield
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
+
+
+class CodeWhaleShell:
+    """Full-screen adaptive Rich UI modeled after the CodeWhale terminal shell."""
+
+    REFRESH_SECONDS = 0.08
+
+    def __init__(self, session: Session, *, theme_name: str = "default"):
+        self.session = session
+        self.theme_name = theme_name
+        self.username = getpass.getuser()
+        self.model = getattr(session.client, "model", None) or config.model
+        self.version = self._version()
+
+        self.transcript: list[TranscriptBlock] = []
+        self.tasks: list[TaskTurn] = []
+        self.command_history: list[str] = []
+        self.history_index: int | None = None
+
+        self.input_buffer = ""
+        self.cursor = 0
+        self.composer_label = "Composer"
+        self.composer_hint = "编写任务或使用 /。"
+        self.footer_state = "turn completed"
+        self.running = True
+        self.live: Live | None = None
+        self._stdin_decoder = codecs.getincrementaldecoder("utf-8")()
+
+    @staticmethod
+    def _version() -> str:
+        try:
+            from deepforge import __version__
+            return __version__
+        except Exception:
+            return "0.1.0"
+
+    def run(self) -> None:
+        """Run the adaptive shell until the user exits."""
+        self._add_system("DeepForge ready. Use /help for commands.")
+        session_callback = self.session.agent.approval_callback if self.session.agent else None
+        if self.session.agent:
+            self.session.agent.approval_callback = self._approve_tool_call
+
+        try:
+            with raw_terminal_mode(), Live(
+                self._layout(),
+                console=console,
+                screen=True,
+                auto_refresh=False,
+                transient=False,
+            ) as live:
+                self.live = live
+                while self.running:
+                    try:
+                        user_input = self._read_line()
+                    except KeyboardInterrupt:
+                        self._add_system("Interrupted. Press Ctrl-D or type /exit to quit.")
+                        self._refresh()
+                        continue
+                    except EOFError:
+                        break
+
+                    if not user_input:
+                        continue
+
+                    self.command_history.append(user_input)
+                    self.history_index = None
+                    self._add_user(user_input)
+                    self._refresh()
+
+                    if user_input.startswith("/"):
+                        self.running = self._handle_live_command(user_input)
+                        self._refresh()
+                        continue
+
+                    self._process_agent_turn(user_input)
+        finally:
+            if self.session.agent:
+                self.session.agent.approval_callback = session_callback
+            self.live = None
+
+    # ── Layout Rendering ────────────────────────────────────────
+
+    def _layout(self) -> Layout:
+        width = console.width
+        height = console.height
+        composer_size = 4 if height >= 16 else 3
+        footer_size = 1 if height >= 10 else 0
+
+        root = Layout(name="root")
+        rows = [
+            Layout(self._header(), name="header", size=1),
+            Layout(name="body", ratio=1, minimum_size=4),
+            Layout(self._composer(), name="composer", size=composer_size),
+        ]
+        if footer_size:
+            rows.append(Layout(self._footer(), name="footer", size=footer_size))
+        root.split_column(*rows)
+
+        if width >= 112 and height >= 15:
+            task_width = min(48, max(34, int(width * 0.29)))
+            root["body"].split_row(
+                Layout(self._transcript_panel(), name="transcript", ratio=1),
+                Layout(self._tasks_panel(), name="tasks", size=task_width),
+            )
+        elif height >= 18:
+            task_height = min(8, max(5, height // 4))
+            root["body"].split_column(
+                Layout(self._transcript_panel(), name="transcript", ratio=1),
+                Layout(self._tasks_panel(compact=True), name="tasks", size=task_height),
+            )
+        else:
+            root["body"].update(self._transcript_panel(compact=True))
+
+        return root
+
+    def _header(self) -> Table:
+        stats = self.session.get_context_stats()
+        ratio_str = stats.get("usage_ratio", "0%")
+        try:
+            ratio = float(str(ratio_str).rstrip("%")) / 100
+        except ValueError:
+            ratio = 0.0
+
+        left = Text.assemble(
+            ("Agent", f"bold {BLUE} on {BG}"),
+            ("  ", f"on {BG}"),
+            (self.username, f"bold {TEXT} on {BG}"),
+            (" · ", f"dim on {BG}"),
+            (self.model, f"{MUTED} on {BG}"),
+        )
+        right = Text.assemble(
+            ("🐳", f"{CYAN} on {BG}"),
+            (" · ", f"dim on {BG}"),
+            (self.session.policy.value, f"bold {TEXT} on {BG}"),
+            ("  ", f"on {BG}"),
+            (f"{ratio:.0%}", f"bold {BLUE} on {BG}"),
+            (" ", f"on {BG}"),
+            self._mini_pressure_bar(ratio),
+            ("  ", f"on {BG}"),
+            (f"v{self.version}", f"{MUTED} on {BG}"),
+        )
+
+        grid = Table.grid(expand=True)
+        grid.add_column(ratio=1)
+        grid.add_column(justify="right")
+        grid.add_row(left, right)
+        return grid
+
+    def _mini_pressure_bar(self, ratio: float) -> Text:
+        width = 4
+        filled = min(width, max(0, int(round(ratio * width))))
+        bar = Text(style=f"on {BG}")
+        bar.append("▰" * filled, style=f"{BLUE} on {BG}")
+        bar.append("▱" * (width - filled), style=f"{BORDER_DIM} on {BG}")
+        return bar
+
+    def _transcript_panel(self, *, compact: bool = False) -> Padding:
+        available_width = max(24, console.width - (52 if console.width >= 112 else 4))
+        content = self._render_transcript(available_width, compact=compact)
+        return Padding(content, (0, 0), style=f"on {BG}")
+
+    def _render_transcript(self, width: int, *, compact: bool = False) -> Group:
+        max_blocks = max(8, console.height - (8 if compact else 6))
+        blocks = self.transcript[-max_blocks:]
+        renderables = []
+        for block in blocks:
+            renderables.extend(self._render_block(block, width))
+        if not renderables:
+            blank = Text("DeepForge", style=f"bold {BLUE} on {BG}")
+            blank.append(" waits for a task.", style=f"{MUTED} on {BG}")
+            renderables.append(blank)
+        return Group(*renderables)
+
+    def _render_block(self, block: TranscriptBlock, width: int) -> list[Text]:
+        lines: list[Text] = []
+        wrap_width = max(20, width - 4)
+        chunks = self._wrap(block.content, wrap_width)
+
+        if block.kind == "user":
+            first = Text(style=f"on {BG}")
+            first.append("▎ ", style=f"bold {GREEN} on {SURFACE_HI}")
+            first.append(chunks[0] if chunks else "", style=f"bold {GREEN} on {SURFACE_HI}")
+            first.append(" " * max(0, wrap_width - len(chunks[0] if chunks else "")), style=f"on {SURFACE_HI}")
+            lines.append(first)
+            for extra in chunks[1:]:
+                line = Text("  " + extra, style=f"{GREEN} on {SURFACE_HI}")
+                line.append(" " * max(0, wrap_width - len(extra)), style=f"on {SURFACE_HI}")
+                lines.append(line)
+            return lines
+
+        if block.kind == "assistant":
+            if block.meta:
+                meta = Text("… ", style=f"{DIM_TEXT} on {BG}")
+                meta.append(block.meta, style=f"bold {TEXT} on {BG}")
+                lines.append(meta)
+            if not chunks:
+                chunks = [""]
+            first = Text("● ", style=f"{BLUE} on {BG}")
+            first.append(chunks[0], style=f"{TEXT} on {BG}")
+            lines.append(first)
+            for extra in chunks[1:]:
+                lines.append(Text("  " + extra, style=f"{TEXT} on {BG}"))
+            return lines
+
+        if block.kind == "tool":
+            for chunk in chunks:
+                line = Text("→ ", style=f"{CYAN} on {BG}")
+                line.append(chunk, style=f"{MUTED} on {BG}")
+                lines.append(line)
+            return lines
+
+        if block.kind == "error":
+            for chunk in chunks:
+                line = Text("✗ ", style=f"bold {ERROR} on {BG}")
+                line.append(chunk, style=f"{ERROR} on {BG}")
+                lines.append(line)
+            return lines
+
+        for chunk in chunks:
+            lines.append(Text(chunk, style=f"{block.style} on {BG}"))
+        return lines
+
+    @staticmethod
+    def _wrap(content: str, width: int) -> list[str]:
+        if not content:
+            return [""]
+        lines: list[str] = []
+        for raw_line in content.splitlines() or [""]:
+            wrapped = textwrap.wrap(
+                raw_line,
+                width=width,
+                replace_whitespace=False,
+                drop_whitespace=False,
+            )
+            lines.extend(wrapped or [""])
+        return lines
+
+    def _tasks_panel(self, *, compact: bool = False) -> Panel:
+        body = self._render_tasks(compact=compact)
+        return Panel(
+            body,
+            title=Text(" Tasks ", style=f"bold {YELLOW}"),
+            title_align="left",
+            box=box.SQUARE,
+            border_style=BORDER,
+            padding=(0, 1),
+            style=f"on {BG}",
+        )
+
+    def _render_tasks(self, *, compact: bool = False) -> Group:
+        if not self.tasks:
+            return Group(Text("No turns yet", style=f"{DIM_TEXT} on {BG}"))
+
+        visible = self.tasks[-3:] if compact else self.tasks[-6:]
+        lines: list[Text] = []
+        for task in visible:
+            status_style = GREEN if task.status == "completed" else YELLOW if task.status == "running" else ERROR
+            title = Text(style=f"on {BG}")
+            title.append(f"Turn {task.index}", style=f"bold {YELLOW} on {BG}")
+            title.append(f" ({task.status})", style=f"{status_style} on {BG}")
+            lines.append(title)
+
+            elapsed = task.finished_ms / 1000 if task.finished_ms else time.time() - task.started_at
+            step = Text(style=f"on {BG}")
+            step.append(task.step, style=f"bold {ORANGE if task.status == 'running' else MUTED} on {BG}")
+            if task.status == "running":
+                step.append(f" {elapsed:.1f}s", style=f"{MUTED} on {BG}")
+            lines.append(step)
+
+            for name, state in task.events[-4:]:
+                state_style = GREEN if state == "done" else ERROR if state == "fail" else CYAN
+                event_line = Text("  ", style=f"on {BG}")
+                event_line.append(state, style=f"{state_style} on {BG}")
+                event_line.append(f" {name}", style=f"{MUTED} on {BG}")
+                lines.append(event_line)
+            if not compact:
+                lines.append(Text("", style=f"on {BG}"))
+        return Group(*lines)
+
+    def _composer(self) -> Panel:
+        line = Text(style=f"on {SURFACE}")
+        prompt = "▎ "
+        line.append(prompt, style=f"bold {GREEN} on {SURFACE}")
+
+        if self.input_buffer:
+            before = self.input_buffer[: self.cursor]
+            at_cursor = self.input_buffer[self.cursor : self.cursor + 1]
+            after = self.input_buffer[self.cursor + 1 :]
+            line.append(before, style=f"{TEXT} on {SURFACE}")
+            if at_cursor:
+                line.append(at_cursor, style=f"{BG} on {TEXT}")
+            else:
+                line.append(" ", style=f"{BG} on {TEXT}")
+            line.append(after, style=f"{TEXT} on {SURFACE}")
+        else:
+            line.append(self.composer_hint, style=f"{DIM_TEXT} on {SURFACE}")
+
+        return Panel(
+            line,
+            title=Text(self.composer_label, style=f"{MUTED}"),
+            title_align="left",
+            subtitle=Text(f" {self.footer_state} ", style=f"{CYAN}"),
+            subtitle_align="right",
+            box=box.SQUARE,
+            border_style=BORDER,
+            padding=(0, 1),
+            style=f"on {SURFACE}",
+        )
+
+    def _footer(self) -> Table:
+        stats = self.session.stats()
+        client = self.session.client
+        hit = getattr(client, "cache_hit_tokens", 0) if client else 0
+        miss = getattr(client, "cache_miss_tokens", 0) if client else 0
+        tokens = stats.get("api_tokens_used", 0)
+
+        left = Text.assemble(
+            ("✓ ", f"bold {BLUE} on {BG}"),
+            (self.footer_state, f"bold {BLUE} on {BG}"),
+        )
+        right = Text(
+            f"Cache: hit {hit:,} | miss {miss:,}  tok {tokens/1000:.1f}k",
+            style=f"{MUTED} on {BG}",
+        )
+        grid = Table.grid(expand=True)
+        grid.add_column(ratio=1)
+        grid.add_column(justify="right")
+        grid.add_row(left, right)
+        return grid
+
+    # ── Input Handling ─────────────────────────────────────────
+
+    def _read_line(self, *, prompt: str | None = None) -> str:
+        original_hint = self.composer_hint
+        if prompt is not None:
+            self.composer_hint = prompt
+        self.input_buffer = ""
+        self.cursor = 0
+        self._refresh()
+
+        try:
+            while True:
+                key = self._read_key(timeout=self.REFRESH_SECONDS)
+                self._refresh()
+                if key is None:
+                    continue
+                result = self._apply_key(key)
+                if result == "submit":
+                    line = self.input_buffer.strip()
+                    self.input_buffer = ""
+                    self.cursor = 0
+                    self.composer_hint = original_hint
+                    self._refresh()
+                    return line
+                if result == "eof":
+                    raise EOFError
+                if result == "interrupt":
+                    raise KeyboardInterrupt
+        finally:
+            self.composer_hint = original_hint
+
+    def _read_key(self, *, timeout: float) -> str | None:
+        if not sys.stdin.isatty():
+            line = sys.stdin.readline()
+            if line == "":
+                raise EOFError
+            return line
+
+        fd = sys.stdin.fileno()
+        readable, _, _ = select.select([fd], [], [], timeout)
+        if not readable:
+            return None
+
+        data = os.read(fd, 32)
+        if not data:
+            raise EOFError
+        key = self._stdin_decoder.decode(data)
+        if not key:
+            return None
+        if key == "\x1b":
+            while True:
+                more, _, _ = select.select([fd], [], [], 0.001)
+                if not more:
+                    break
+                more_data = os.read(fd, 8)
+                if not more_data:
+                    break
+                key += self._stdin_decoder.decode(more_data)
+                if key.endswith("~") or key.endswith(("A", "B", "C", "D", "F", "H")):
+                    break
+        return key
+
+    def _apply_key(self, key: str) -> str | None:
+        if "\n" in key or "\r" in key:
+            if len(key) > 1 and not key.startswith("\x1b"):
+                self.input_buffer = key.strip()
+            return "submit"
+        if key == "\x03":
+            return "interrupt"
+        if key == "\x04":
+            return "eof" if not self.input_buffer else None
+        if key in ("\x7f", "\b"):
+            if self.cursor > 0:
+                self.input_buffer = self.input_buffer[: self.cursor - 1] + self.input_buffer[self.cursor :]
+                self.cursor -= 1
+            return None
+        if key == "\x1b[D":
+            self.cursor = max(0, self.cursor - 1)
+            return None
+        if key == "\x1b[C":
+            self.cursor = min(len(self.input_buffer), self.cursor + 1)
+            return None
+        if key in ("\x1b[H", "\x1b[1~"):
+            self.cursor = 0
+            return None
+        if key in ("\x1b[F", "\x1b[4~"):
+            self.cursor = len(self.input_buffer)
+            return None
+        if key == "\x1b[3~":
+            if self.cursor < len(self.input_buffer):
+                self.input_buffer = self.input_buffer[: self.cursor] + self.input_buffer[self.cursor + 1 :]
+            return None
+        if key == "\x1b[A":
+            self._history_previous()
+            return None
+        if key == "\x1b[B":
+            self._history_next()
+            return None
+        if key.startswith("\x1b"):
+            return None
+
+        for ch in key:
+            if ch.isprintable():
+                self.input_buffer = self.input_buffer[: self.cursor] + ch + self.input_buffer[self.cursor :]
+                self.cursor += 1
+        return None
+
+    def _history_previous(self) -> None:
+        if not self.command_history:
+            return
+        if self.history_index is None:
+            self.history_index = len(self.command_history) - 1
+        else:
+            self.history_index = max(0, self.history_index - 1)
+        self.input_buffer = self.command_history[self.history_index]
+        self.cursor = len(self.input_buffer)
+
+    def _history_next(self) -> None:
+        if self.history_index is None:
+            return
+        self.history_index += 1
+        if self.history_index >= len(self.command_history):
+            self.history_index = None
+            self.input_buffer = ""
+        else:
+            self.input_buffer = self.command_history[self.history_index]
+        self.cursor = len(self.input_buffer)
+
+    # ── Agent + Commands ───────────────────────────────────────
+
+    def _process_agent_turn(self, user_input: str) -> None:
+        task = TaskTurn(index=len(self.tasks) + 1)
+        self.tasks.append(task)
+        assistant = TranscriptBlock("assistant", "", meta="reasoning running")
+        self.transcript.append(assistant)
+        self.footer_state = "turn running"
+        tool_count = 0
+        self._refresh()
+
+        try:
+            for event in self.session.agent.process_stream(user_input):
+                etype = event["type"]
+                if etype == "text":
+                    assistant.content += event["content"]
+                    task.step = "model reasoning"
+                elif etype == "tool_start":
+                    tool_count += 1
+                    name = event.get("name", "tool")
+                    task.step = "tool running"
+                    task.events.append((name, "run"))
+                    args = event.get("args") or {}
+                    arg_text = f" {args}" if args else ""
+                    self.transcript.append(TranscriptBlock("tool", f"{name}{arg_text}", style=CYAN))
+                elif etype == "tool_end":
+                    name = event.get("name", "tool")
+                    success = bool(event.get("success"))
+                    task.events.append((name, "done" if success else "fail"))
+                    if not success and event.get("output"):
+                        self.transcript.append(TranscriptBlock("error", f"{name}: {event['output']}"))
+                elif etype == "done":
+                    task.status = "completed"
+                    task.finished_ms = float(event.get("ms", 0))
+                    task.step = "reasoning done"
+                    if not assistant.content and event.get("content"):
+                        assistant.content = event["content"]
+                    latency = task.finished_ms / 1000
+                    tokens = int(event.get("tokens", 0) or 0)
+                    parts = [f"reasoning done · {latency:.1f}s"]
+                    if tool_count:
+                        parts.append(f"{tool_count} tool(s)")
+                    if tokens:
+                        parts.append(f"{tokens:,} tok")
+                    assistant.meta = "  ".join(parts)
+                    self.footer_state = "turn completed"
+                elif etype == "error":
+                    task.status = "failed"
+                    task.step = "error"
+                    self.footer_state = "turn failed"
+                    self.transcript.append(TranscriptBlock("error", event["error"]))
+                self._refresh()
+        except Exception as exc:
+            task.status = "failed"
+            task.step = "error"
+            self.footer_state = "turn failed"
+            self.transcript.append(TranscriptBlock("error", str(exc)))
+            self._refresh()
+
+        if self.session.context and self.session.context.needs_compaction:
+            ctx = self.session.get_context_stats()
+            self._add_system(f"Context {ctx.get('usage_ratio', '?')} — use /compact.")
+        self._refresh()
+
+    def _approve_tool_call(self, tool, tool_call, gate_result) -> bool:
+        args = _format_tool_arguments(tool_call.arguments)
+        self._add_system(
+            f"Approval required for {tool_call.function_name}\n"
+            f"Reason: {gate_result.reason}\n"
+            f"Arguments:\n{args}"
+        )
+        self._refresh()
+        try:
+            answer = self._read_line(prompt="Approve this tool call? [y/N]")
+        except (KeyboardInterrupt, EOFError):
+            return False
+        return answer.strip().lower() in {"y", "yes"}
+
+    def _handle_live_command(self, cmd: str) -> bool:
+        parts = cmd.strip().split()
+        command = parts[0].lower()
+
+        if command in ("/exit", "/quit", "/q"):
+            self._add_system("Goodbye.")
+            return False
+
+        if command == "/help":
+            self._add_system(
+                "Commands: /mode agent|plan|yolo, /policy auto|suggest|never, "
+                "/tools, /mcp status|tools|reload, /stats, /context, /compact, "
+                "/theme list|default|worldcup|dragonball, /clear, /exit"
+            )
+        elif command == "/mode":
+            if len(parts) < 2:
+                self._add_system(f"Current mode: {self.session.mode.value}")
+            else:
+                try:
+                    new_mode = Mode(parts[1].lower())
+                    self.session.set_mode(new_mode)
+                    self._add_system(f"Mode changed to {new_mode.value}.")
+                except ValueError:
+                    self._add_error(f"Invalid mode: {parts[1]}")
+        elif command == "/policy":
+            if len(parts) < 2:
+                self._add_system(f"Current policy: {self.session.policy.value}")
+            else:
+                try:
+                    new_policy = ApprovalPolicy(parts[1].lower())
+                    self.session.set_approval_policy(new_policy)
+                    self._add_system(f"Policy changed to {new_policy.value}.")
+                except ValueError:
+                    self._add_error(f"Invalid policy: {parts[1]}")
+        elif command == "/tools":
+            tools = self.session.available_tools
+            if not tools:
+                self._add_system("No tools registered.")
+            else:
+                self._add_system("Available tools:\n" + "\n".join(f"- {name}" for name in tools))
+        elif command == "/stats":
+            stats = self.session.stats()
+            lines = []
+            for key, value in stats.items():
+                if isinstance(value, dict):
+                    value = ", ".join(f"{k}={v}" for k, v in value.items())
+                lines.append(f"{key}: {value}")
+            self._add_system("Session statistics:\n" + "\n".join(lines))
+        elif command == "/context":
+            ctx = self.session.get_context_stats()
+            if ctx:
+                self._add_system("Context:\n" + "\n".join(f"{k}: {v}" for k, v in ctx.items()))
+            else:
+                self._add_system("Context not initialized.")
+        elif command == "/compact":
+            result = self.session.compact()
+            if result.get("compacted"):
+                self._add_system(
+                    f"Compacted {result.get('turns_compacted', 0)} turns, "
+                    f"freed {result.get('tokens_freed', 0):,} tokens."
+                )
+            else:
+                self._add_system(str(result.get("reason", "Compaction not needed.")))
+        elif command == "/mcp":
+            self._handle_mcp_command(parts)
+        elif command == "/theme":
+            self._handle_theme_command(parts)
+        elif command == "/clear":
+            self.transcript.clear()
+            self.tasks.clear()
+            self._add_system("Cleared.")
+        else:
+            self._add_error(f"Unknown command: {command}. Type /help for available commands.")
+        return True
+
+    def _handle_mcp_command(self, parts: list[str]) -> None:
+        subcommand = parts[1].lower() if len(parts) > 1 else "status"
+        if subcommand == "reload":
+            self.session.reload_mcp()
+            subcommand = "status"
+
+        if subcommand == "status":
+            status = self.session.mcp_status()
+            lines = [f"enabled: {status.get('enabled')}"]
+            if status.get("config_path"):
+                lines.append(f"config: {status['config_path']}")
+            if status.get("error"):
+                lines.append(f"error: {status['error']}")
+            servers = status.get("servers") or []
+            if not servers:
+                lines.append("servers: none")
+            for server in servers:
+                state = "connected" if server.get("connected") else f"error: {server.get('error') or 'not connected'}"
+                lines.append(
+                    f"- {server.get('name')} [{server.get('transport')}] {state} "
+                    f"tools={server.get('tool_count', 0)}"
+                )
+            self._add_system("MCP status:\n" + "\n".join(lines))
+        elif subcommand == "tools":
+            tools = [name for name in self.session.available_tools if name.startswith("mcp__")]
+            self._add_system("MCP tools:\n" + ("\n".join(f"- {name}" for name in tools) if tools else "none"))
+        else:
+            self._add_error("Usage: /mcp status|tools|reload")
+
+    def _handle_theme_command(self, parts: list[str]) -> None:
+        if len(parts) < 2 or parts[1].lower() == "list":
+            current = themes.get_active()
+            lines = []
+            for name, theme in sorted(themes.list_themes().items()):
+                marker = " active" if current and current.name == name else ""
+                lines.append(f"- {name}: {theme.label}{marker}")
+            self._add_system("Available themes:\n" + "\n".join(lines))
+            return
+
+        name = parts[1].lower()
+        if name in {"off", "reset"}:
+            name = "default"
+        try:
+            themes.activate(name)
+            self.theme_name = name
+            self._add_system(f"Theme set to {name}. CodeWhale layout remains active.")
+        except ValueError as exc:
+            self._add_error(str(exc))
+
+    # ── State helpers ──────────────────────────────────────────
+
+    def _add_user(self, content: str) -> None:
+        self.transcript.append(TranscriptBlock("user", content))
+
+    def _add_system(self, content: str) -> None:
+        self.transcript.append(TranscriptBlock("system", content, style=MUTED))
+
+    def _add_error(self, content: str) -> None:
+        self.transcript.append(TranscriptBlock("error", content))
+
+    def _refresh(self) -> None:
+        if self.live:
+            self.live.update(self._layout(), refresh=True)
+
+
 # ── Interactive Loop ───────────────────────────────────────────────
 
 def run_tui(session: Session, *, theme_name: str = "default") -> None:
-    """Main TUI loop with streaming output."""
+    """Main TUI loop with a CodeWhale-style adaptive layout."""
     # Activate the selected theme
     try:
         themes.activate(theme_name)
@@ -302,104 +1053,7 @@ def run_tui(session: Session, *, theme_name: str = "default") -> None:
         themes.activate("default")
         theme_name = "default"
 
-    active = themes.get_active()
-    console.clear()
-    console.print(active.render_banner(session))
-
-    while True:
-        try:
-            bar = active.render_status_bar(session)
-            console.print(bar)
-            console.print()
-            user_input = read_user_input()
-        except (KeyboardInterrupt, EOFError):
-            console.print("\n[dim]Goodbye! 👋[/]")
-            break
-
-        if not user_input:
-            continue
-
-        if user_input.startswith("/"):
-            if not handle_command(user_input, session):
-                break
-            continue
-
-        # ── Streaming response ─────────────────────────────────
-        console.print()
-        tool_count = 0
-        all_tool_names: list[str] = []
-        text_buffer = ""
-
-        def flush_text_buffer(force: bool = False) -> None:
-            nonlocal text_buffer
-            wrap_at = max(40, console.width - 6)
-
-            while "\n" in text_buffer:
-                line, text_buffer = text_buffer.split("\n", 1)
-                console.print(line, style="white")
-
-            if force and text_buffer:
-                console.print(text_buffer, style="white")
-                text_buffer = ""
-            elif len(text_buffer) >= wrap_at:
-                console.print(text_buffer, style="white")
-                text_buffer = ""
-
-        try:
-            for event in session.agent.process_stream(user_input):
-                etype = event["type"]
-
-                if etype == "text":
-                    text_buffer += event["content"]
-                    flush_text_buffer()
-
-                elif etype == "tool_start":
-                    flush_text_buffer(force=True)
-                    tool_count += 1
-                    tool_name = event["name"]
-                    all_tool_names.append(tool_name)
-                    console.print(f"[dim cyan]→ {tool_name}[/]", end="")
-                    args = event.get("args") or {}
-                    if args:
-                        console.print(f" [dim]{args}[/]")
-                    else:
-                        console.print()
-
-                elif etype == "tool_end":
-                    flush_text_buffer(force=True)
-                    tool_name = event.get("name", "tool")
-                    success = event.get("success", False)
-                    style = "green" if success else "red"
-                    symbol = "✓" if success else "✗"
-                    console.print(f"[{style}]{symbol} {tool_name}[/]")
-                    if not success and event.get("output"):
-                        console.print(f"[red]{event['output']}[/]")
-
-                elif etype == "done":
-                    flush_text_buffer(force=True)
-                    total_tokens = event.get("tokens", 0)
-                    latency = event.get("ms", 0)
-                    console.print()
-                    parts = []
-                    if tool_count:
-                        parts.append(f"{tool_count} tool(s)")
-                    parts.append(f"{latency:.0f}ms")
-                    parts.append(f"{total_tokens:,} tokens")
-                    console.print(f"[dim]── {' · '.join(parts)} ──[/]")
-
-                elif etype == "error":
-                    flush_text_buffer(force=True)
-                    console.print(f"\n[bold red]❌ {event['error']}[/]")
-
-        except Exception as e:
-            flush_text_buffer(force=True)
-            console.print(f"\n[bold red]❌ {e}[/]")
-
-        console.print()
-
-        if session.context and session.context.needs_compaction:
-            ctx = session.get_context_stats()
-            console.print(f"[yellow]⚠ Context {ctx.get('usage_ratio', '?')} — /compact[/]")
+    CodeWhaleShell(session, theme_name=theme_name).run()
 
 
 # ── Commands ────────────────────────────────────────────────────────
@@ -626,7 +1280,7 @@ def main():
     parser.add_argument("--policy", choices=["auto", "suggest", "never"], default=None)
     parser.add_argument("--workspace", "-w", default=None)
     parser.add_argument("--model", default=None,
-                        help="Model to use (default: deepseek-chat for DeepSeek, gpt-4o for Azure)")
+                        help="Model to use (default: deepseek-chat for DeepSeek, gpt5.4 for Azure)")
     parser.add_argument("--backend", "-b", choices=["deepseek", "azure"], default=None,
                         help="Model backend: deepseek or azure (default: deepseek)")
     parser.add_argument("--config", default=None,
@@ -647,14 +1301,14 @@ def main():
 
     # Determine backend (CLI arg > config file > env var > default)
     resolved_backend = args.backend
+    config_path = Path(args.config).resolve() if args.config else None
+    from deepforge.config import _discover_config_path, _load_yaml_config
+    yaml_data = _load_yaml_config(config_path or _discover_config_path())
     if resolved_backend is None:
-        config_path = Path(args.config).resolve() if args.config else None
-        from deepforge.config import _discover_config_path, _load_yaml_config
-        yaml_data = _load_yaml_config(config_path or _discover_config_path())
         resolved_backend = yaml_data.get("backend", "deepseek")
     resolved_backend = resolved_backend.lower()
 
-    if not check_api_key(resolved_backend):
+    if not check_api_key(resolved_backend, yaml_data):
         sys.exit(1)
 
     session_config = SessionConfig(
@@ -684,8 +1338,7 @@ def main():
             yaml_config.workspace = Path(args.workspace).resolve()
         if args.model:
             yaml_config.model = args.model
-        from deepforge import config as config_module
-        config_module.config = yaml_config
+        config.__dict__.update(yaml_config.__dict__)
 
     session = Session(session_config=session_config)
     try:

@@ -162,6 +162,26 @@ deepforge --workspace /path/to/project
 deepforge --model deepseek-reasoner
 ```
 
+### Azure / Responses API gateway
+
+If your Azure-compatible provider gives you a full Responses API URL, copy `env.yaml.example`
+to `config/env.yaml`, set `backend: azure`, and fill in `azure.api_url`:
+
+```yaml
+backend: azure
+
+azure:
+  api_url: "https://xxx.com/api/dv-exp-sandboxkey-openai-api/1/openai/responses?api-version=2025-04-01-preview"
+  api_key: "your-key"
+  model: "gpt5.4"
+  max_output_tokens: 4096
+```
+
+For this mode, only replace the host/path/key/model values. DeepForge strips the trailing
+`/responses`, reads `api-version` from the URL, and uses the Azure backend through the
+Responses API. Standard Azure OpenAI deployment config with `endpoint`, `deployment`,
+and `api_version` is still supported.
+
 ### 4. In-session commands
 ```
 /mode agent|plan|yolo    Switch operating mode
