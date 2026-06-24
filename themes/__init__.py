@@ -24,19 +24,25 @@ from rich.text import Text
 class Theme:
     """A TUI visual theme.
 
-    name          — unique identifier (matches module filename)
-    label         — human-readable name shown in /theme list
-    colors        — dict of color style strings (e.g. {"banner": "bold cyan", ...})
-    render_banner — (session) -> Panel
+    name              — unique identifier (matches module filename)
+    label             — human-readable name shown in /theme list
+    colors            — dict of color style strings (e.g. {"banner": "bold cyan", ...})
+    codewhale_colors  — dict of CodeWhale layout color keys:
+                        bg, surface, surface_hi, border, border_dim,
+                        blue, cyan, green, yellow, orange,
+                        muted, text, dim_text, error,
+                        icon, progress, complete, running, failed
+    render_banner     — (session) -> Panel
     render_status_bar — (session) -> Text
-    render_dashboard — optional (session) -> list[Rich renderables]  shown on /theme X
+    render_dashboard  — optional (session) -> list[Rich renderables]  shown on /theme X
     """
 
     name: str
     label: str
     colors: dict[str, str]
-    render_banner: Callable
-    render_status_bar: Callable
+    codewhale_colors: dict[str, str] | None = None
+    render_banner: Callable | None = None
+    render_status_bar: Callable | None = None
     render_dashboard: Optional[Callable] = None
 
 

@@ -46,6 +46,7 @@ from rich.padding import Padding
 from rich.panel import Panel
 from rich.text import Text
 from rich.table import Table
+from rich.cells import cell_len
 from rich import box
 
 from deepforge.config import ApprovalPolicy, Backend, Mode, config
@@ -311,20 +312,74 @@ class ToolProgressDisplay:
 
 # ── CodeWhale-style Shell ────────────────────────────────────────────
 
-BG = "default"
-SURFACE = "default"
-SURFACE_HI = "default"
-BORDER = "#24508A"
-BORDER_DIM = "#17345F"
-BLUE = "#58A6FF"
-CYAN = "#3DD6D0"
-GREEN = "#37E58F"
-YELLOW = "#F4B74A"
-ORANGE = "#D98A35"
-MUTED = "#7E8CA6"
-TEXT = "#D7E4F5"
-DIM_TEXT = "#6F7D96"
-ERROR = "#FF6370"
+# Default CodeWhale colors (used as fallback when no theme is active)
+_DEFAULT_CW = {
+    "bg": "default",
+    "surface": "default",
+    "surface_hi": "default",
+    "border": "#24508A",
+    "border_dim": "#17345F",
+    "blue": "#58A6FF",
+    "cyan": "#3DD6D0",
+    "green": "#37E58F",
+    "yellow": "#F4B74A",
+    "orange": "#D98A35",
+    "muted": "#7E8CA6",
+    "text": "#D7E4F5",
+    "dim_text": "#6F7D96",
+    "error": "#FF6370",
+    "icon": "🐳",
+    "progress": "#58A6FF",
+    "complete": "#58A6FF",
+    "running": "#F4B74A",
+    "failed": "#FF6370",
+}
+
+
+def _cw_value(key: str) -> str:
+    """Get a CodeWhale theme token from the active theme, falling back to default."""
+    theme = themes.get_active()
+    if theme and theme.codewhale_colors:
+        return theme.codewhale_colors.get(key, _DEFAULT_CW.get(key, "default"))
+    return _DEFAULT_CW.get(key, "default")
+
+
+def _cw_color(key: str) -> str:
+    return _cw_value(key)
+
+
+class _CWColor:
+    """String-like dynamic theme color token."""
+
+    def __init__(self, key: str):
+        self.key = key
+
+    def __str__(self) -> str:
+        return _cw_color(self.key)
+
+    def __format__(self, format_spec: str) -> str:
+        return format(str(self), format_spec)
+
+
+# Convenience color tokens (used throughout CodeWhaleShell)
+BG = _CWColor("bg")
+SURFACE = _CWColor("surface")
+SURFACE_HI = _CWColor("surface_hi")
+BORDER = _CWColor("border")
+BORDER_DIM = _CWColor("border_dim")
+BLUE = _CWColor("blue")
+CYAN = _CWColor("cyan")
+GREEN = _CWColor("green")
+YELLOW = _CWColor("yellow")
+ORANGE = _CWColor("orange")
+MUTED = _CWColor("muted")
+TEXT = _CWColor("text")
+DIM_TEXT = _CWColor("dim_text")
+ERROR = _CWColor("error")
+PROGRESS = _CWColor("progress")
+COMPLETE = _CWColor("complete")
+RUNNING = _CWColor("running")
+FAILED = _CWColor("failed")
 
 
 @dataclass
@@ -361,8 +416,12 @@ def raw_terminal_mode():
 
     try:
         tty.setcbreak(fd)
+        sys.stdout.write("\x1b[?1000h\x1b[?1006h")
+        sys.stdout.flush()
         yield
     finally:
+        sys.stdout.write("\x1b[?1006l\x1b[?1000l")
+        sys.stdout.flush()
         termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
 
 
@@ -388,9 +447,13 @@ class CodeWhaleShell:
         self.composer_label = "Composer"
         self.composer_hint = "编写任务或使用 /。"
         self.footer_state = "turn completed"
+        self.scroll_offset = 0
+        self._last_transcript_total_lines = 0
+        self._last_transcript_visible_lines = 1
         self.running = True
         self.live: Live | None = None
         self._stdin_decoder = codecs.getincrementaldecoder("utf-8")()
+        self._last_render_size = (console.width, console.height)
 
     @staticmethod
     def _version() -> str:
@@ -450,8 +513,9 @@ class CodeWhaleShell:
     def _layout(self) -> Layout:
         width = console.width
         height = console.height
-        composer_size = 4 if height >= 16 else 3
+        composer_size = 3
         footer_size = 1 if height >= 10 else 0
+        body_height = max(4, height - 1 - composer_size - footer_size)
 
         root = Layout(name="root")
         rows = [
@@ -466,17 +530,18 @@ class CodeWhaleShell:
         if width >= 112 and height >= 15:
             task_width = min(48, max(34, int(width * 0.29)))
             root["body"].split_row(
-                Layout(self._transcript_panel(), name="transcript", ratio=1),
+                Layout(self._transcript_panel(visible_lines=body_height), name="transcript", ratio=1),
                 Layout(self._tasks_panel(), name="tasks", size=task_width),
             )
         elif height >= 18:
             task_height = min(8, max(5, height // 4))
+            transcript_height = max(1, body_height - task_height)
             root["body"].split_column(
-                Layout(self._transcript_panel(), name="transcript", ratio=1),
+                Layout(self._transcript_panel(visible_lines=transcript_height), name="transcript", ratio=1),
                 Layout(self._tasks_panel(compact=True), name="tasks", size=task_height),
             )
         else:
-            root["body"].update(self._transcript_panel(compact=True))
+            root["body"].update(self._transcript_panel(visible_lines=body_height, compact=True))
 
         return root
 
@@ -489,18 +554,18 @@ class CodeWhaleShell:
             ratio = 0.0
 
         left = Text.assemble(
-            ("Agent", f"bold {BLUE} on {BG}"),
+            ("Agent", f"bold {PROGRESS} on {BG}"),
             ("  ", f"on {BG}"),
             (self.username, f"bold {TEXT} on {BG}"),
             (" · ", f"dim on {BG}"),
             (self.model, f"{MUTED} on {BG}"),
         )
         right = Text.assemble(
-            ("🐳", f"{CYAN} on {BG}"),
+            (_cw_value("icon"), f"{PROGRESS} on {BG}"),
             (" · ", f"dim on {BG}"),
-            (self.session.policy.value, f"bold {TEXT} on {BG}"),
+            (self.session.policy.value, f"bold {YELLOW} on {BG}"),
             ("  ", f"on {BG}"),
-            (f"{ratio:.0%}", f"bold {BLUE} on {BG}"),
+            (f"{ratio:.0%}", f"bold {PROGRESS} on {BG}"),
             (" ", f"on {BG}"),
             self._mini_pressure_bar(ratio),
             ("  ", f"on {BG}"),
@@ -517,26 +582,38 @@ class CodeWhaleShell:
         width = 4
         filled = min(width, max(0, int(round(ratio * width))))
         bar = Text(style=f"on {BG}")
-        bar.append("▰" * filled, style=f"{BLUE} on {BG}")
+        bar.append("▰" * filled, style=f"{PROGRESS} on {BG}")
         bar.append("▱" * (width - filled), style=f"{BORDER_DIM} on {BG}")
         return bar
 
-    def _transcript_panel(self, *, compact: bool = False) -> Padding:
+    def _transcript_panel(self, *, visible_lines: int, compact: bool = False) -> Padding:
         available_width = max(24, console.width - (52 if console.width >= 112 else 4))
-        content = self._render_transcript(available_width, compact=compact)
+        content = self._render_transcript(available_width, visible_lines=visible_lines, compact=compact)
         return Padding(content, (0, 0), style=f"on {BG}")
 
-    def _render_transcript(self, width: int, *, compact: bool = False) -> Group:
-        max_blocks = max(8, console.height - (8 if compact else 6))
-        blocks = self.transcript[-max_blocks:]
-        renderables = []
-        for block in blocks:
+    def _render_transcript(self, width: int, *, visible_lines: int, compact: bool = False) -> Group:
+        visible_lines = max(1, visible_lines)
+        renderables: list[Text] = []
+        for block in self.transcript:
             renderables.extend(self._render_block(block, width))
         if not renderables:
             blank = Text("DeepForge", style=f"bold {BLUE} on {BG}")
             blank.append(" waits for a task.", style=f"{MUTED} on {BG}")
             renderables.append(blank)
-        return Group(*renderables)
+
+        self._last_transcript_total_lines = len(renderables)
+        self._last_transcript_visible_lines = visible_lines
+        max_scroll = max(0, len(renderables) - visible_lines)
+        self.scroll_offset = min(max(0, self.scroll_offset), max_scroll)
+
+        if self.scroll_offset:
+            end = max(visible_lines, len(renderables) - self.scroll_offset)
+            start = max(0, end - visible_lines)
+        else:
+            start = max(0, len(renderables) - visible_lines)
+            end = len(renderables)
+
+        return Group(*renderables[start:end])
 
     def _render_block(self, block: TranscriptBlock, width: int) -> list[Text]:
         lines: list[Text] = []
@@ -547,11 +624,9 @@ class CodeWhaleShell:
             first = Text(style=f"on {BG}")
             first.append("▎ ", style=f"bold {GREEN} on {SURFACE_HI}")
             first.append(chunks[0] if chunks else "", style=f"bold {GREEN} on {SURFACE_HI}")
-            first.append(" " * max(0, wrap_width - len(chunks[0] if chunks else "")), style=f"on {SURFACE_HI}")
             lines.append(first)
             for extra in chunks[1:]:
                 line = Text("  " + extra, style=f"{GREEN} on {SURFACE_HI}")
-                line.append(" " * max(0, wrap_width - len(extra)), style=f"on {SURFACE_HI}")
                 lines.append(line)
             return lines
 
@@ -574,6 +649,20 @@ class CodeWhaleShell:
                 line = Text("→ ", style=f"{CYAN} on {BG}")
                 line.append(chunk, style=f"{MUTED} on {BG}")
                 lines.append(line)
+            return lines
+
+        if block.kind == "terminal":
+            is_error = str(block.style) in {str(ERROR), str(FAILED)}
+            accent = FAILED if is_error else PROGRESS
+            marker = "✗" if is_error else "▸"
+            header = Text(f"{marker} terminal", style=f"bold {accent} on {BG}")
+            if block.meta:
+                header.append(f" · {block.meta}", style=f"{MUTED} on {BG}")
+            lines.append(header)
+            for chunk in chunks:
+                body = Text("│ ", style=f"{BORDER_DIM} on {BG}")
+                body.append(chunk, style=f"{block.style} on {BG}")
+                lines.append(body)
             return lines
 
         if block.kind == "error":
@@ -609,7 +698,7 @@ class CodeWhaleShell:
             title=Text(" Tasks ", style=f"bold {YELLOW}"),
             title_align="left",
             box=box.SQUARE,
-            border_style=BORDER,
+            border_style=str(BORDER),
             padding=(0, 1),
             style=f"on {BG}",
         )
@@ -621,7 +710,7 @@ class CodeWhaleShell:
         visible = self.tasks[-3:] if compact else self.tasks[-6:]
         lines: list[Text] = []
         for task in visible:
-            status_style = GREEN if task.status == "completed" else YELLOW if task.status == "running" else ERROR
+            status_style = self._status_style(task.status)
             title = Text(style=f"on {BG}")
             title.append(f"Turn {task.index}", style=f"bold {YELLOW} on {BG}")
             title.append(f" ({task.status})", style=f"{status_style} on {BG}")
@@ -629,13 +718,14 @@ class CodeWhaleShell:
 
             elapsed = task.finished_ms / 1000 if task.finished_ms else time.time() - task.started_at
             step = Text(style=f"on {BG}")
-            step.append(task.step, style=f"bold {ORANGE if task.status == 'running' else MUTED} on {BG}")
+            step_style = RUNNING if task.status == "running" else MUTED
+            step.append(task.step, style=f"bold {step_style} on {BG}")
             if task.status == "running":
                 step.append(f" {elapsed:.1f}s", style=f"{MUTED} on {BG}")
             lines.append(step)
 
             for name, state in task.events[-4:]:
-                state_style = GREEN if state == "done" else ERROR if state == "fail" else CYAN
+                state_style = COMPLETE if state == "done" else FAILED if state == "fail" else PROGRESS
                 event_line = Text("  ", style=f"on {BG}")
                 event_line.append(state, style=f"{state_style} on {BG}")
                 event_line.append(f" {name}", style=f"{MUTED} on {BG}")
@@ -644,20 +734,23 @@ class CodeWhaleShell:
                 lines.append(Text("", style=f"on {BG}"))
         return Group(*lines)
 
+    def _status_style(self, status: str) -> _CWColor:
+        if status == "completed":
+            return COMPLETE
+        if status == "running":
+            return RUNNING
+        return FAILED
+
     def _composer(self) -> Panel:
         line = Text(style=f"on {SURFACE}")
         prompt = "▎ "
         line.append(prompt, style=f"bold {GREEN} on {SURFACE}")
 
         if self.input_buffer:
-            before = self.input_buffer[: self.cursor]
-            at_cursor = self.input_buffer[self.cursor : self.cursor + 1]
-            after = self.input_buffer[self.cursor + 1 :]
+            max_input_cells = max(8, console.width - 8)
+            before, at_cursor, after = self._visible_input_segments(max_input_cells)
             line.append(before, style=f"{TEXT} on {SURFACE}")
-            if at_cursor:
-                line.append(at_cursor, style=f"{BG} on {TEXT}")
-            else:
-                line.append(" ", style=f"{BG} on {TEXT}")
+            line.append(at_cursor, style=f"{TEXT} on {SURFACE}")
             line.append(after, style=f"{TEXT} on {SURFACE}")
         else:
             line.append(self.composer_hint, style=f"{DIM_TEXT} on {SURFACE}")
@@ -669,10 +762,66 @@ class CodeWhaleShell:
             subtitle=Text(f" {self.footer_state} ", style=f"{CYAN}"),
             subtitle_align="right",
             box=box.SQUARE,
-            border_style=BORDER,
+            border_style=str(BORDER),
             padding=(0, 1),
             style=f"on {SURFACE}",
         )
+
+    def _visible_input_segments(self, max_cells: int) -> tuple[str, str, str]:
+        """Return a single-line view of the input around the cursor."""
+        text = self.input_buffer
+        cursor = min(max(0, self.cursor), len(text))
+        if cell_len(text) <= max_cells:
+            return text[:cursor], text[cursor : cursor + 1], text[cursor + 1 :]
+
+        cursor_text = text[cursor : cursor + 1]
+        cursor_cells = cell_len(cursor_text) if cursor_text else 1
+        before_budget = max(0, max_cells - cursor_cells)
+
+        start = cursor
+        used_before = 0
+        while start > 0:
+            char_cells = cell_len(text[start - 1 : start])
+            if used_before + char_cells > before_budget:
+                break
+            start -= 1
+            used_before += char_cells
+
+        end = cursor + (1 if cursor_text else 0)
+        used_total = used_before + cursor_cells
+        while end < len(text):
+            char_cells = cell_len(text[end : end + 1])
+            if used_total + char_cells > max_cells:
+                break
+            end += 1
+            used_total += char_cells
+
+        return text[start:cursor], cursor_text, text[cursor + 1 : end]
+
+    def _composer_cursor_position(self) -> tuple[int, int]:
+        height = console.height
+        footer_size = 1 if height >= 10 else 0
+        composer_size = 3
+        body_height = max(4, height - 1 - composer_size - footer_size)
+
+        # 1-based terminal coordinates. The composer input row is the middle row
+        # of the 3-line panel; column 5 is after border, padding, and prompt.
+        row = min(height, max(1, body_height + 3))
+        if self.input_buffer:
+            max_input_cells = max(8, console.width - 8)
+            before, _, _ = self._visible_input_segments(max_input_cells)
+            col = 5 + cell_len(before)
+        else:
+            col = 5
+        return row, min(console.width, max(1, col))
+
+    def _place_terminal_cursor(self) -> None:
+        if not sys.stdin.isatty():
+            return
+        row, col = self._composer_cursor_position()
+        output = self.live.console.file if self.live else console.file
+        output.write(f"\x1b[{row};{col}H\x1b[?25h")
+        output.flush()
 
     def _footer(self) -> Table:
         stats = self.session.stats()
@@ -680,11 +829,14 @@ class CodeWhaleShell:
         hit = getattr(client, "cache_hit_tokens", 0) if client else 0
         miss = getattr(client, "cache_miss_tokens", 0) if client else 0
         tokens = stats.get("api_tokens_used", 0)
+        footer_style = COMPLETE if self.footer_state == "turn completed" else RUNNING if self.footer_state == "turn running" else FAILED
 
         left = Text.assemble(
-            ("✓ ", f"bold {BLUE} on {BG}"),
-            (self.footer_state, f"bold {BLUE} on {BG}"),
+            ("✓ ", f"bold {footer_style} on {BG}"),
+            (self.footer_state, f"bold {footer_style} on {BG}"),
         )
+        if self.scroll_offset:
+            left.append(f"  view -{self.scroll_offset} lines", style=f"{YELLOW} on {BG}")
         right = Text(
             f"Cache: hit {hit:,} | miss {miss:,}  tok {tokens/1000:.1f}k",
             style=f"{MUTED} on {BG}",
@@ -708,8 +860,8 @@ class CodeWhaleShell:
         try:
             while True:
                 key = self._read_key(timeout=self.REFRESH_SECONDS)
-                self._refresh()
                 if key is None:
+                    self._refresh_if_resized()
                     continue
                 result = self._apply_key(key)
                 if result == "submit":
@@ -723,6 +875,7 @@ class CodeWhaleShell:
                     raise EOFError
                 if result == "interrupt":
                     raise KeyboardInterrupt
+                self._refresh()
         finally:
             self.composer_hint = original_hint
 
@@ -783,6 +936,21 @@ class CodeWhaleShell:
         if key in ("\x1b[F", "\x1b[4~"):
             self.cursor = len(self.input_buffer)
             return None
+        if key == "\x1b[5~":
+            self._scroll_transcript(self._scroll_page_size())
+            return None
+        if key == "\x1b[6~":
+            self._scroll_transcript(-self._scroll_page_size())
+            return None
+        if key == "\x1b[1;2A":
+            self._scroll_transcript(1)
+            return None
+        if key == "\x1b[1;2B":
+            self._scroll_transcript(-1)
+            return None
+        if key.startswith("\x1b[<") and key.endswith("M"):
+            self._apply_mouse_event(key)
+            return None
         if key == "\x1b[3~":
             if self.cursor < len(self.input_buffer):
                 self.input_buffer = self.input_buffer[: self.cursor] + self.input_buffer[self.cursor + 1 :]
@@ -801,6 +969,23 @@ class CodeWhaleShell:
                 self.input_buffer = self.input_buffer[: self.cursor] + ch + self.input_buffer[self.cursor :]
                 self.cursor += 1
         return None
+
+    def _scroll_page_size(self) -> int:
+        return max(4, self._last_transcript_visible_lines - 1)
+
+    def _scroll_transcript(self, delta: int) -> None:
+        max_scroll = max(0, self._last_transcript_total_lines - self._last_transcript_visible_lines)
+        self.scroll_offset = min(max(0, self.scroll_offset + delta), max_scroll)
+
+    def _apply_mouse_event(self, key: str) -> None:
+        try:
+            button = int(key[3:].split(";", 1)[0])
+        except (ValueError, IndexError):
+            return
+        if button == 64:
+            self._scroll_transcript(3)
+        elif button == 65:
+            self._scroll_transcript(-3)
 
     def _history_previous(self) -> None:
         if not self.command_history:
@@ -830,6 +1015,7 @@ class CodeWhaleShell:
         self.tasks.append(task)
         assistant = TranscriptBlock("assistant", "", meta="reasoning running")
         self.transcript.append(assistant)
+        self.scroll_offset = 0
         self.footer_state = "turn running"
         tool_count = 0
         self._refresh()
@@ -846,14 +1032,31 @@ class CodeWhaleShell:
                     task.step = "tool running"
                     task.events.append((name, "run"))
                     args = event.get("args") or {}
-                    arg_text = f" {args}" if args else ""
-                    self.transcript.append(TranscriptBlock("tool", f"{name}{arg_text}", style=CYAN))
+                    self.transcript.append(TranscriptBlock(
+                        "terminal",
+                        self._tool_notice_command(name, args),
+                        style=PROGRESS,
+                        meta="tool call",
+                    ))
+                    self.scroll_offset = 0
                 elif etype == "tool_end":
                     name = event.get("name", "tool")
                     success = bool(event.get("success"))
                     task.events.append((name, "done" if success else "fail"))
-                    if not success and event.get("output"):
-                        self.transcript.append(TranscriptBlock("error", f"{name}: {event['output']}"))
+                    output = event.get("output") or ""
+                    if success:
+                        self.transcript.append(TranscriptBlock(
+                            "terminal",
+                            f"{name} completed",
+                            style=COMPLETE,
+                            meta="tool done",
+                        ))
+                    else:
+                        detail = f"{name} failed"
+                        if output:
+                            detail += f"\n{self._short_text(output, 360)}"
+                        self.transcript.append(TranscriptBlock("terminal", detail, style=FAILED, meta="tool failed"))
+                    self.scroll_offset = 0
                 elif etype == "done":
                     task.status = "completed"
                     task.finished_ms = float(event.get("ms", 0))
@@ -874,12 +1077,21 @@ class CodeWhaleShell:
                     task.step = "error"
                     self.footer_state = "turn failed"
                     self.transcript.append(TranscriptBlock("error", event["error"]))
+                    self.scroll_offset = 0
                 self._refresh()
+        except KeyboardInterrupt:
+            task.status = "failed"
+            task.step = "interrupted"
+            self.footer_state = "turn interrupted"
+            self.transcript.append(TranscriptBlock("terminal", "request interrupted", style=FAILED, meta="interrupt"))
+            self.scroll_offset = 0
+            self._refresh()
         except Exception as exc:
             task.status = "failed"
             task.step = "error"
             self.footer_state = "turn failed"
             self.transcript.append(TranscriptBlock("error", str(exc)))
+            self.scroll_offset = 0
             self._refresh()
 
         if self.session.context and self.session.context.needs_compaction:
@@ -1029,16 +1241,37 @@ class CodeWhaleShell:
 
     def _add_user(self, content: str) -> None:
         self.transcript.append(TranscriptBlock("user", content))
+        self.scroll_offset = 0
 
     def _add_system(self, content: str) -> None:
         self.transcript.append(TranscriptBlock("system", content, style=MUTED))
+        self.scroll_offset = 0
 
     def _add_error(self, content: str) -> None:
         self.transcript.append(TranscriptBlock("error", content))
+        self.scroll_offset = 0
+
+    @staticmethod
+    def _short_text(text: str, limit: int) -> str:
+        text = text.replace("\r", "")
+        return text if len(text) <= limit else text[:limit].rstrip() + "\n... truncated"
+
+    def _tool_notice_command(self, name: str, args: dict) -> str:
+        if not args:
+            return f"$ {name}"
+        text = json.dumps(args, ensure_ascii=False, separators=(",", ": "))
+        return f"$ {name} {self._short_text(text, 300)}"
 
     def _refresh(self) -> None:
         if self.live:
+            self._last_render_size = (console.width, console.height)
             self.live.update(self._layout(), refresh=True)
+            self._place_terminal_cursor()
+
+    def _refresh_if_resized(self) -> None:
+        current_size = (console.width, console.height)
+        if current_size != self._last_render_size:
+            self._refresh()
 
 
 # ── Interactive Loop ───────────────────────────────────────────────

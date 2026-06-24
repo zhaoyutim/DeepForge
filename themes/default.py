@@ -217,12 +217,38 @@ def render_status_bar(session) -> "Text":
     return bar
 
 
+# ── CodeWhale Layout Colors ──────────────────────────────────────────
+
+CODEWHALE_COLORS = {
+    "bg": "default",
+    "surface": "default",
+    "surface_hi": "default",
+    "border": "#24508A",
+    "border_dim": "#17345F",
+    "blue": "#58A6FF",
+    "cyan": "#3DD6D0",
+    "green": "#37E58F",
+    "yellow": "#F4B74A",
+    "orange": "#D98A35",
+    "muted": "#7E8CA6",
+    "text": "#D7E4F5",
+    "dim_text": "#6F7D96",
+    "error": "#FF6370",
+    "icon": "🐳",
+    "progress": "#58A6FF",
+    "complete": "#58A6FF",
+    "running": "#F4B74A",
+    "failed": "#FF6370",
+}
+
+
 # ── Register ──────────────────────────────────────────────────────────
 
 theme = Theme(
     name="default",
     label="Default — cyan tech aesthetic",
     colors=COLORS,
+    codewhale_colors=CODEWHALE_COLORS,
     render_banner=render_banner,
     render_status_bar=render_status_bar,
 )

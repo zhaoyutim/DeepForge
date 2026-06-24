@@ -429,12 +429,38 @@ def render_dashboard(_session) -> list:
     return outputs
 
 
+# ── CodeWhale Layout Colors ──────────────────────────────────────────
+
+CODEWHALE_COLORS = {
+    "bg": "default",
+    "surface": "default",
+    "surface_hi": "default",
+    "border": "#1E8E3E",
+    "border_dim": "#145A28",
+    "blue": "#F9AB00",
+    "cyan": "#F9AB00",
+    "green": "#1E8E3E",
+    "yellow": "#F9AB00",
+    "orange": "#EA4335",
+    "muted": "#6B8E6B",
+    "text": "#F0FFF0",
+    "dim_text": "#8FBC8F",
+    "error": "#EA4335",
+    "icon": "⚽",
+    "progress": "#F9AB00",
+    "complete": "#1E8E3E",
+    "running": "#F9AB00",
+    "failed": "#EA4335",
+}
+
+
 # ── Register ──────────────────────────────────────────────────────────
 
 theme = Theme(
     name="worldcup",
     label="World Cup 2026 — football pitch green, group tables, knockout bracket",
     colors=COLORS,
+    codewhale_colors=CODEWHALE_COLORS,
     render_banner=render_banner,
     render_status_bar=render_status_bar,
     render_dashboard=render_dashboard,

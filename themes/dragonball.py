@@ -414,12 +414,38 @@ def render_dashboard(_session) -> list:
     return outputs
 
 
+# ── CodeWhale Layout Colors ──────────────────────────────────────────
+
+CODEWHALE_COLORS = {
+    "bg": "default",
+    "surface": "default",
+    "surface_hi": "default",
+    "border": "#FF6B35",
+    "border_dim": "#8B4513",
+    "blue": "#FFD700",
+    "cyan": "#FFD700",
+    "green": "#2E7D32",
+    "yellow": "#FFD700",
+    "orange": "#FF6B35",
+    "muted": "#A08060",
+    "text": "#FFE4C4",
+    "dim_text": "#8B7355",
+    "error": "#FF4081",
+    "icon": "🐉",
+    "progress": "#FFD700",
+    "complete": "#FFD700",
+    "running": "#FF6B35",
+    "failed": "#FF4081",
+}
+
+
 # ── Register ──────────────────────────────────────────────────────────
 
 theme = Theme(
     name="dragonball",
     label="🐉 Dragon Ball — Goku orange, Vegeta blue, Shenron green, Super Saiyan gold",
     colors=COLORS,
+    codewhale_colors=CODEWHALE_COLORS,
     render_banner=render_banner,
     render_status_bar=render_status_bar,
     render_dashboard=render_dashboard,
